@@ -1,0 +1,33 @@
+import { listQueuedEvents } from "@/lib/db/indexed-db";
+import type { ManualEvent } from "@/lib/event-model/types";
+
+export interface SyncResult {
+  acceptedClientEventIds: string[];
+  rejected: Array<{ clientEventId: string; reason: string }>;
+}
+
+export async function pushQueuedEvents(sessionId: string, gameId: string): Promise<SyncResult> {
+  const events = (await listQueuedEvents()).filter((event) => event.sessionId === sessionId);
+  if (!events.length) {
+    return { acceptedClientEventIds: [], rejected: [] };
+  }
+
+  const response = await fetch("/api/manual-events/batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId, gameId, events })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Sync failed: ${response.status}`);
+  }
+
+  return response.json() as Promise<SyncResult>;
+}
+
+export function eventsToSyncPayload(events: ManualEvent[]) {
+  return events.map((event) => ({
+    ...event,
+    syncStatus: "queued"
+  }));
+}

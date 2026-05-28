@@ -1,0 +1,9 @@
+{
+  "name": "Frisbee Live Capture",
+  "short_name": "Live Capture",
+  "start_url": "/capture",
+  "display": "standalone",
+  "background_color": "#f7f8f5",
+  "theme_color": "#0f766e",
+  "icons": []
+}

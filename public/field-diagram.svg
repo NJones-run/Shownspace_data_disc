@@ -1,0 +1,25 @@
+<svg viewBox="0 0 1200 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Ultimate field diagram">
+  <defs>
+    <linearGradient id="grass" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#76b6a7" />
+      <stop offset="100%" stop-color="#2a6f5e" />
+    </linearGradient>
+    <pattern id="stripe" width="120" height="120" patternUnits="userSpaceOnUse">
+      <rect width="120" height="120" fill="rgba(255,255,255,0.08)" />
+    </pattern>
+  </defs>
+  <rect x="0" y="0" width="1200" height="600" rx="32" ry="32" fill="url(#grass)" />
+  <rect x="0" y="0" width="1200" height="600" rx="32" ry="32" fill="url(#stripe)" />
+  <rect x="60" y="60" width="1080" height="480" rx="24" ry="24" fill="none" stroke="#f8fafc" stroke-width="8" />
+  <rect x="60" y="60" width="360" height="480" rx="20" ry="20" fill="none" stroke="#f8fafc" stroke-width="6" />
+  <rect x="780" y="60" width="360" height="480" rx="20" ry="20" fill="none" stroke="#f8fafc" stroke-width="6" />
+  <line x1="60" y1="300" x2="1140" y2="300" stroke="#f8fafc" stroke-width="6" stroke-dasharray="24 16" />
+  <line x1="60" y1="120" x2="1140" y2="120" stroke="#f8fafc" stroke-width="4" stroke-dasharray="12 12" />
+  <line x1="60" y1="480" x2="1140" y2="480" stroke="#f8fafc" stroke-width="4" stroke-dasharray="12 12" />
+  <line x1="330" y1="60" x2="330" y2="540" stroke="#f8fafc" stroke-width="4" stroke-dasharray="12 12" />
+  <line x1="870" y1="60" x2="870" y2="540" stroke="#f8fafc" stroke-width="4" stroke-dasharray="12 12" />
+  <circle cx="600" cy="300" r="36" fill="none" stroke="#f8fafc" stroke-width="6" />
+  <text x="160" y="50" fill="#f8fafc" font-family="Inter, sans-serif" font-size="36" font-weight="700">Defensive endzone</text>
+  <text x="640" y="50" fill="#f8fafc" font-family="Inter, sans-serif" font-size="36" font-weight="700">Offensive endzone</text>
+  <text x="60" y="590" fill="rgba(248,250,252,0.8)" font-family="Inter, sans-serif" font-size="24">Click on the field to pick X/Y coordinates</text>
+</svg>
