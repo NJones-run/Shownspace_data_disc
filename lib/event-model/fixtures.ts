@@ -1,3 +1,4 @@
+import { nanoid } from "nanoid";
 import type { CaptureGame, CapturePlayer, CaptureState } from "./types";
 
 export const demoGame: CaptureGame = {
@@ -129,7 +130,7 @@ export function createCaptureState(game: CaptureGame, players: CapturePlayer[] =
   return {
     game,
     session: {
-      sessionId: `session-${game.GameID}`,
+      sessionId: `session-${game.GameID}-${nanoid(8)}`,
       gameId: game.GameID,
       deviceId: "local-device",
       scorerName: "Demo Scorer",

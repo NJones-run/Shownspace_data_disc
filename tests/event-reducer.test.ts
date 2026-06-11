@@ -183,6 +183,15 @@ describe("captureReducer", () => {
     expect(state.players.some((player) => player.PlayerID === "shred-jordan-kerr")).toBe(true);
   });
 
+  it("creates a unique capture session for each new state", () => {
+    const first = createDemoState();
+    const second = createDemoState();
+
+    expect(first.session.sessionId).toMatch(/^session-2026-demo-NY-SLC-/);
+    expect(second.session.sessionId).toMatch(/^session-2026-demo-NY-SLC-/);
+    expect(first.session.sessionId).not.toBe(second.session.sessionId);
+  });
+
   it("creates custom state with entered teams and empty rosters", () => {
     const state = createCustomState("Visitors", "Hosts");
 

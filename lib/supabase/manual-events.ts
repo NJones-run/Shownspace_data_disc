@@ -63,7 +63,7 @@ export async function persistManualEventBatch(batch: ManualEventBatchInput) {
   const rows = batch.events.map(eventToManualEventRow);
   const { error: eventError } = await supabase
     .from("manual_events")
-    .upsert(rows, { onConflict: "session_id,client_event_id" });
+    .upsert(rows, { onConflict: "session_id,event_seq" });
   throwIfSupabaseError(eventError);
 
   return batch.events.map((event) => event.clientEventId);
