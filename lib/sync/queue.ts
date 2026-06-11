@@ -19,7 +19,9 @@ export async function pushQueuedEvents(sessionId: string, gameId: string): Promi
   });
 
   if (!response.ok) {
-    throw new Error(`Sync failed: ${response.status}`);
+    const body = (await response.json().catch(() => null)) as SyncResult | null;
+    const firstReason = body?.rejected[0]?.reason;
+    throw new Error(firstReason ? `Sync failed: ${response.status} ${firstReason}` : `Sync failed: ${response.status}`);
   }
 
   return response.json() as Promise<SyncResult>;
