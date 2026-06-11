@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
-import type { CaptureGame, CapturePlayer, CaptureSession, ManualEvent } from "@/lib/event-model/types";
+import type { CaptureGame, CapturePlayer, CaptureSession, ManualEvent, SyncStatus } from "@/lib/event-model/types";
 
 interface LiveCaptureDB extends DBSchema {
   games: {
@@ -47,6 +47,28 @@ export function getCaptureDB() {
 export async function saveEvent(event: ManualEvent) {
   const db = await getCaptureDB();
   await db.put("events", event);
+}
+
+export async function saveEvents(events: ManualEvent[]) {
+  const db = await getCaptureDB();
+  const tx = db.transaction("events", "readwrite");
+  await Promise.all(events.map((event) => tx.store.put(event)));
+  await tx.done;
+}
+
+export async function updateEventSyncStatus(clientEventIds: string[], syncStatus: SyncStatus) {
+  if (!clientEventIds.length) return;
+  const db = await getCaptureDB();
+  const tx = db.transaction("events", "readwrite");
+  await Promise.all(
+    clientEventIds.map(async (clientEventId) => {
+      const event = await tx.store.get(clientEventId);
+      if (event) {
+        await tx.store.put({ ...event, syncStatus });
+      }
+    })
+  );
+  await tx.done;
 }
 
 export async function listSessionEvents(sessionId: string) {

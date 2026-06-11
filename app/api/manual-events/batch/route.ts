@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { persistManualEventBatch } from "@/lib/supabase/manual-events";
 import { manualEventBatchSchema } from "@/lib/validation/manual-event";
 
 export async function POST(request: Request) {
@@ -15,10 +16,25 @@ export async function POST(request: Request) {
     );
   }
 
-  const acceptedClientEventIds = parsed.data.events.map((event) => event.clientEventId);
-  return NextResponse.json({
-    acceptedClientEventIds,
-    rejected: [],
-    stagingStatus: "accepted_for_review"
-  });
+  try {
+    const acceptedClientEventIds = await persistManualEventBatch(parsed.data);
+    return NextResponse.json({
+      acceptedClientEventIds,
+      rejected: [],
+      stagingStatus: "accepted_for_review"
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to persist manual event batch";
+    const missingSupabaseEnv = message.includes("Missing SUPABASE_URL");
+    return NextResponse.json(
+      {
+        acceptedClientEventIds: [],
+        rejected: parsed.data.events.map((event) => ({
+          clientEventId: event.clientEventId,
+          reason: message
+        }))
+      },
+      { status: missingSupabaseEnv ? 503 : 500 }
+    );
+  }
 }

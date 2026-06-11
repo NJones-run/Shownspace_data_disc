@@ -46,6 +46,7 @@ export function captureReducer(state: CaptureState, action: CaptureAction): Capt
           defensiveLinePlayerIds: event.defensiveLinePlayerIds,
           fieldX: event.fieldX,
           fieldY: event.fieldY,
+          gameClockSecondsRemaining: event.gameClockSecondsRemaining,
           payload: { ...event.payload, clientEventId: event.clientEventId, occurredAt: event.occurredAt }
         }),
       initialLike(state)
@@ -59,6 +60,14 @@ export function captureReducer(state: CaptureState, action: CaptureAction): Capt
     return {
       ...state,
       events: state.events.map((event) => (ids.has(event.clientEventId) ? { ...event, syncStatus } : event))
+    };
+  }
+
+  if (action.type === "set_quarter") {
+    return {
+      ...state,
+      quarter: action.quarter,
+      session: { ...state.session, updatedAt: new Date().toISOString() }
     };
   }
 
@@ -79,6 +88,7 @@ export function captureReducer(state: CaptureState, action: CaptureAction): Capt
     defensiveLinePlayerIds: action.defensiveLinePlayerIds,
     fieldX: action.fieldX,
     fieldY: action.fieldY,
+    gameClockSecondsRemaining: action.gameClockSecondsRemaining,
     quarter: state.quarter,
     pointNumber: state.pointNumber,
     possessionNumber: state.possessionNumber,
@@ -88,33 +98,44 @@ export function captureReducer(state: CaptureState, action: CaptureAction): Capt
     payload: action.payload ?? {},
     syncStatus: "local"
   };
-    // If this is a possession_start, apply special handling
-    const isPossessionStart = action.eventType === "possession_start";
+  // If this is a possession boundary, apply special handling
+  const isPossessionStart = action.eventType === "possession_start";
+  const isPossessionEnd = action.eventType === "possession_end";
+  const isBlock = action.eventType === "block";
+  const isTurnover = action.eventType === "turnover";
 
-    // Infer the thrower for a throw event when actorPlayerId was not provided
-    if (action.eventType === "throw" && !event.actorPlayerId) {
-      const lastCatch = [...state.events].reverse().find((e) => e.eventType === "catch" && e.actorPlayerId);
-      if (lastCatch) {
-        event.actorPlayerId = lastCatch.actorPlayerId;
-      }
+  // Infer the thrower for a throw event when actorPlayerId was not provided
+  if (action.eventType === "throw" && !event.actorPlayerId) {
+    const lastCatch = [...state.events].reverse().find((e) => e.eventType === "catch" && e.actorPlayerId);
+    if (lastCatch) {
+      event.actorPlayerId = lastCatch.actorPlayerId;
     }
+  }
 
-    const possessionChanges = ["pull", "throw", "drop", "block", "turnover", "goal"].includes(action.eventType);
-    const pointEnded = action.eventType === "goal";
+  const pointEnded = action.eventType === "goal";
 
-    return {
-      ...state,
-      game: { ...state.game, HomeScore: scores.homeScore, AwayScore: scores.awayScore },
-      session: { ...state.session, updatedAt: now },
-      events: [...state.events, event],
-      possessionTeamSide: pointEnded
-        ? nextPossessionSide(teamSide)
-        : isPossessionStart
-        ? teamSide
-        : possessionChanges
-        ? teamSide
-        : state.possessionTeamSide,
-      possessionNumber: pointEnded ? 1 : isPossessionStart ? 1 : possessionChanges ? state.possessionNumber + 1 : state.possessionNumber,
-      pointNumber: pointEnded ? state.pointNumber + 1 : state.pointNumber
-    };
+  return {
+    ...state,
+    game: { ...state.game, HomeScore: scores.homeScore, AwayScore: scores.awayScore },
+    session: { ...state.session, updatedAt: now },
+    events: [...state.events, event],
+    possessionTeamSide: pointEnded
+      ? nextPossessionSide(teamSide)
+      : isPossessionStart
+      ? teamSide
+      : isPossessionEnd
+      ? state.possessionTeamSide
+      : isBlock
+      ? teamSide
+      : isTurnover
+      ? nextPossessionSide(teamSide)
+      : state.possessionTeamSide,
+    possessionNumber:
+      pointEnded || isPossessionStart
+        ? 1
+        : isPossessionEnd || isBlock || isTurnover
+        ? state.possessionNumber + 1
+        : state.possessionNumber,
+    pointNumber: pointEnded ? state.pointNumber + 1 : state.pointNumber
+  };
 }

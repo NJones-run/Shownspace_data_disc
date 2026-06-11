@@ -1,14 +1,19 @@
 "use client";
 
-import { useMemo, useReducer, useState, type MouseEvent } from "react";
+import { Suspense, useEffect, useMemo, useReducer, useRef, useState, type MouseEvent } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { saveEvents, updateEventSyncStatus } from "@/lib/db/indexed-db";
+import { getCurrentPossessionTrace } from "@/lib/event-model/field-trace";
 import { captureReducer } from "@/lib/event-model/reducer";
-import { createDemoState, demoLinePresets } from "@/lib/event-model/fixtures";
-import type { CapturePlayer, ManualEventType, TeamSide } from "@/lib/event-model/types";
+import { createCustomState, createDemoState, demoGame, demoLinePresets } from "@/lib/event-model/fixtures";
+import { seedLinePresets, togglePresetPlayer, type LinePresetsByTeam } from "@/lib/event-model/line-presets";
+import type { CapturePlayer, CaptureState, ManualEventType, TeamSide } from "@/lib/event-model/types";
+import { markQueuedEventsSynced, pushQueuedEvents } from "@/lib/sync/queue";
+
+const CLOCK_START_SECONDS = 15 * 60;
 
 const eventButtons: Array<{ label: string; eventType: ManualEventType; teamSide?: TeamSide }> = [
-  { label: "Point Start", eventType: "point_start" },
-  { label: "Pull", eventType: "pull" },
   { label: "Throw", eventType: "throw" },
   { label: "Catch", eventType: "catch" },
   { label: "Drop", eventType: "drop" },
@@ -16,29 +21,119 @@ const eventButtons: Array<{ label: string; eventType: ManualEventType; teamSide?
   { label: "Turnover", eventType: "turnover" },
   { label: "Home Goal", eventType: "goal", teamSide: "home" },
   { label: "Away Goal", eventType: "goal", teamSide: "away" },
+  { label: "Pull", eventType: "pull" },
+  { label: "Point Start", eventType: "point_start" },
   { label: "Line Change", eventType: "line_change" },
-  { label: "Penalty", eventType: "penalty" },
-  { label: "Timeout", eventType: "timeout" }
+  { label: "Timeout", eventType: "timeout" },
+  { label: "Penalty", eventType: "penalty" }
 ];
 
-export default function CapturePage() {
-  const initialState = useMemo(() => createDemoState(), []);
+interface RecordEventOptions {
+  actorPlayerId?: string;
+  targetPlayerId?: string;
+  fieldCoordinate?: { x: number; y: number } | null;
+}
+
+function formatClock(seconds: number) {
+  const safeSeconds = Math.max(0, seconds);
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainingSeconds = safeSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
+function createInitialState(gameId: string | null, awayTeam: string | null, homeTeam: string | null): CaptureState {
+  if (gameId === "custom") {
+    return createCustomState(awayTeam ?? "Away", homeTeam ?? "Home");
+  }
+  return createDemoState();
+}
+
+function uniqueIds(ids: string[]) {
+  return Array.from(new Set(ids));
+}
+
+function createInitialLinePresets(isDemoGame: boolean): LinePresetsByTeam {
+  const homeSeed = isDemoGame ? demoLinePresets.find((preset) => preset.id === "shred-offense")?.playerIds ?? [] : [];
+  const awaySeed = isDemoGame ? demoLinePresets.find((preset) => preset.id === "empire-offense")?.playerIds ?? [] : [];
+  return seedLinePresets(homeSeed, awaySeed);
+}
+
+function CapturePageContent() {
+  const searchParams = useSearchParams();
+  const initialState = useMemo(
+    () => createInitialState(searchParams.get("gameId"), searchParams.get("away"), searchParams.get("home")),
+    [searchParams]
+  );
   const [state, dispatch] = useReducer(captureReducer, initialState);
-  const [selectedOffenseLine, setSelectedOffenseLine] = useState<string[]>([]);
-  const [selectedDefenseLine, setSelectedDefenseLine] = useState<string[]>([]);
-  const [selectedThrower, setSelectedThrower] = useState<string>("");
+  const isDemoGame = state.game.GameID === demoGame.GameID;
+  const [recordingTeam, setRecordingTeam] = useState<TeamSide>("home");
+  const [linePresets, setLinePresets] = useState<LinePresetsByTeam>(() => createInitialLinePresets(isDemoGame));
+  const [activeLineId, setActiveLineId] = useState("line-1");
+  const [editingLines, setEditingLines] = useState(false);
+  const [selectedActor, setSelectedActor] = useState<string>("");
   const [selectedReceiver, setSelectedReceiver] = useState<string>("");
   const [selectedFieldCoordinate, setSelectedFieldCoordinate] = useState<{ x: number; y: number } | null>(null);
-  const [selectedEvent, setSelectedEvent] = useState(eventButtons[2]);
-  const [recordingTeam, setRecordingTeam] = useState<TeamSide>(state.possessionTeamSide);
-  const [selectedPresetId, setSelectedPresetId] = useState<string>(demoLinePresets?.[0]?.id ?? "");
+  const [selectedEvent, setSelectedEvent] = useState(eventButtons[0]);
+  const [autoRecordEnabled, setAutoRecordEnabled] = useState(false);
+  const [secondsRemaining, setSecondsRemaining] = useState(CLOCK_START_SECONDS);
+  const [isClockRunning, setIsClockRunning] = useState(false);
+  const [syncMessage, setSyncMessage] = useState("Ready");
+  const [isSyncing, setIsSyncing] = useState(false);
+  const persistedEventIds = useRef(new Set<string>());
   const unsynced = state.events.filter((event) => event.syncStatus !== "synced").length;
   const requiresFieldCoord = ["throw", "catch"].includes(selectedEvent.eventType);
   const recordDisabled = requiresFieldCoord && !selectedFieldCoordinate;
+  const tracePoints = useMemo(() => getCurrentPossessionTrace(state.events), [state.events]);
+
+  useEffect(() => {
+    if (!isClockRunning) return;
+    const intervalId = window.setInterval(() => {
+      setSecondsRemaining((current) => {
+        if (current <= 1) {
+          window.clearInterval(intervalId);
+          setIsClockRunning(false);
+          return 0;
+        }
+        return current - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(intervalId);
+  }, [isClockRunning]);
+
+  useEffect(() => {
+    const newEvents = state.events.filter((event) => !persistedEventIds.current.has(event.clientEventId));
+    if (!newEvents.length) return;
+
+    newEvents.forEach((event) => persistedEventIds.current.add(event.clientEventId));
+    saveEvents(newEvents).catch((error) => {
+      newEvents.forEach((event) => persistedEventIds.current.delete(event.clientEventId));
+      setSyncMessage(error instanceof Error ? error.message : "Unable to save events locally");
+    });
+  }, [state.events]);
 
   const playersById = useMemo(
     () => new Map(state.players.map((player) => [player.PlayerID, player])),
     [state.players]
+  );
+
+  const playersByTeam = useMemo(
+    () => ({
+      away: state.players.filter((player) => player.TeamID === state.game.AwayTeamID),
+      home: state.players.filter((player) => player.TeamID === state.game.HomeTeamID)
+    }),
+    [state.players, state.game.AwayTeamID, state.game.HomeTeamID]
+  );
+  const recordingTeamPlayers = playersByTeam[recordingTeam];
+  const activeTeamPresets = linePresets[recordingTeam];
+  const activePreset = activeTeamPresets.find((preset) => preset.id === activeLineId) ?? activeTeamPresets[0];
+  const activeLinePlayerIds = activePreset?.playerIds ?? [];
+
+  const activePlayers = useMemo(
+    () =>
+      uniqueIds(activeLinePlayerIds)
+        .map((playerId) => playersById.get(playerId))
+        .filter((player): player is CapturePlayer => Boolean(player)),
+    [activeLinePlayerIds, playersById]
   );
 
   const playerLabel = (player?: CapturePlayer) =>
@@ -53,13 +148,68 @@ export default function CapturePage() {
   const lineLabels = (playerIds?: string[]) =>
     playerIds?.map(playerName).filter(Boolean).join(", ") ?? "";
 
-  const toggleLineSelection = (playerId: string, line: "offense" | "defense") => {
-    const selected = line === "offense" ? selectedOffenseLine : selectedDefenseLine;
-    const setter = line === "offense" ? setSelectedOffenseLine : setSelectedDefenseLine;
-    if (selected.includes(playerId)) {
-      setter(selected.filter((id) => id !== playerId));
+  const teamLabel = (side: TeamSide) => (side === "home" ? state.game.HomeTeamID : state.game.AwayTeamID);
+
+  const changeRecordingTeam = (teamSide: TeamSide) => {
+    setRecordingTeam(teamSide);
+    setActiveLineId("line-1");
+    setSelectedActor("");
+    setSelectedReceiver("");
+  };
+
+  const chooseActivePreset = (presetId: string) => {
+    setActiveLineId(presetId);
+    setSelectedActor("");
+    setSelectedReceiver("");
+  };
+
+  const togglePresetSelection = (presetId: string, playerId: string) => {
+    setLinePresets((current) => ({
+      ...current,
+      [recordingTeam]: current[recordingTeam].map((preset) =>
+        preset.id === presetId ? { ...preset, playerIds: togglePresetPlayer(preset.playerIds, playerId) } : preset
+      )
+    }));
+    if (presetId === activeLineId) {
+      setSelectedActor("");
+      setSelectedReceiver("");
+    }
+  };
+
+  const hasAutoRecordDetails = (
+    eventType: ManualEventType,
+    actorPlayerId: string,
+    targetPlayerId: string,
+    fieldCoordinate: { x: number; y: number } | null
+  ) => {
+    if (eventType === "throw") {
+      return Boolean(actorPlayerId && targetPlayerId && fieldCoordinate);
+    }
+    if (eventType === "catch") {
+      return Boolean(actorPlayerId && fieldCoordinate);
+    }
+    return Boolean(actorPlayerId);
+  };
+
+  const selectPlayer = (playerId: string, role: "actor" | "receiver") => {
+    let nextActor = selectedActor;
+    let nextReceiver = selectedReceiver;
+
+    if (role === "actor") {
+      nextActor = selectedActor === playerId ? "" : playerId;
+      nextReceiver = selectedReceiver === playerId ? "" : selectedReceiver;
+      setSelectedActor(nextActor);
+      setSelectedReceiver(nextReceiver);
     } else {
-      setter([...selected, playerId]);
+      nextReceiver = selectedReceiver === playerId ? "" : playerId;
+      setSelectedReceiver(nextReceiver);
+    }
+
+    if (
+      autoRecordEnabled &&
+      hasAutoRecordDetails(selectedEvent.eventType, nextActor, nextReceiver, selectedFieldCoordinate)
+    ) {
+      recordEvent({ actorPlayerId: nextActor, targetPlayerId: nextReceiver, fieldCoordinate: selectedFieldCoordinate });
     }
   };
 
@@ -67,8 +217,128 @@ export default function CapturePage() {
     const rect = event.currentTarget.getBoundingClientRect();
     const x = ((event.clientX - rect.left) / rect.width) * 100;
     const y = ((event.clientY - rect.top) / rect.height) * 100;
-    setSelectedFieldCoordinate({ x: Number(x.toFixed(1)), y: Number(y.toFixed(1)) });
+    const nextCoordinate = { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)) };
+    setSelectedFieldCoordinate(nextCoordinate);
+    if (
+      autoRecordEnabled &&
+      ["throw", "catch"].includes(selectedEvent.eventType) &&
+      hasAutoRecordDetails(selectedEvent.eventType, selectedActor, selectedReceiver, nextCoordinate)
+    ) {
+      recordEvent({ fieldCoordinate: nextCoordinate });
+    }
   };
+
+  const recordEvent = (options: RecordEventOptions = {}) => {
+    const eventType = selectedEvent.eventType;
+    const fieldCoordinate = options.fieldCoordinate !== undefined ? options.fieldCoordinate : selectedFieldCoordinate;
+    const actorForDispatch = (options.actorPlayerId ?? selectedActor) || undefined;
+    const targetForDispatch = eventType === "throw" ? (options.targetPlayerId ?? selectedReceiver) || undefined : undefined;
+    const possessionBoundary = ["block", "goal", "turnover"].includes(eventType);
+    dispatch({
+      type: "record_event",
+      eventType,
+      teamSide: selectedEvent.teamSide ?? recordingTeam,
+      actorPlayerId: actorForDispatch,
+      targetPlayerId: targetForDispatch,
+      offensiveLinePlayerIds: eventType === "point_start" ? activeLinePlayerIds : undefined,
+      fieldX: ["throw", "catch"].includes(eventType) ? fieldCoordinate?.x : undefined,
+      fieldY: ["throw", "catch"].includes(eventType) ? fieldCoordinate?.y : undefined,
+      gameClockSecondsRemaining: secondsRemaining,
+      payload: {}
+    });
+    setSelectedFieldCoordinate(null);
+    if (eventType === "catch" && actorForDispatch) {
+      setSelectedActor(actorForDispatch);
+      setSelectedReceiver("");
+      setSelectedEvent(eventButtons.find((button) => button.eventType === "throw") ?? selectedEvent);
+    } else if (eventType === "throw" && targetForDispatch) {
+      setSelectedActor(targetForDispatch);
+      setSelectedReceiver("");
+    } else if (possessionBoundary) {
+      setSelectedFieldCoordinate(null);
+      setSelectedReceiver("");
+    }
+  };
+
+  const endPossession = () => {
+    dispatch({
+      type: "record_event",
+      eventType: "possession_end",
+      teamSide: recordingTeam,
+      gameClockSecondsRemaining: secondsRemaining,
+      payload: {}
+    });
+    setSelectedFieldCoordinate(null);
+    setSelectedReceiver("");
+  };
+
+  const syncEvents = async () => {
+    const eventsToSync = state.events.filter((event) => event.syncStatus !== "synced");
+    if (!eventsToSync.length) {
+      setSyncMessage("No events to sync");
+      return;
+    }
+
+    const clientEventIds = eventsToSync.map((event) => event.clientEventId);
+    const queuedEvents = eventsToSync.map((event) => ({ ...event, syncStatus: "queued" as const }));
+    setIsSyncing(true);
+    setSyncMessage(`Syncing ${queuedEvents.length} event${queuedEvents.length === 1 ? "" : "s"}...`);
+    dispatch({ type: "mark_queued", clientEventIds });
+
+    try {
+      await saveEvents(queuedEvents);
+      const result = await pushQueuedEvents(state.session.sessionId, state.game.GameID);
+      if (result.acceptedClientEventIds.length) {
+        dispatch({ type: "mark_synced", clientEventIds: result.acceptedClientEventIds });
+        await markQueuedEventsSynced(result.acceptedClientEventIds);
+      }
+
+      const rejectedIds = result.rejected.map((event) => event.clientEventId).filter((id) => id !== "batch");
+      if (rejectedIds.length) {
+        dispatch({ type: "mark_error", clientEventIds: rejectedIds });
+        await updateEventSyncStatus(rejectedIds, "error");
+      }
+
+      setSyncMessage(
+        result.rejected.length
+          ? `Synced ${result.acceptedClientEventIds.length}, rejected ${result.rejected.length}`
+          : `Synced ${result.acceptedClientEventIds.length} event${result.acceptedClientEventIds.length === 1 ? "" : "s"}`
+      );
+    } catch (error) {
+      dispatch({ type: "mark_error", clientEventIds });
+      await updateEventSyncStatus(clientEventIds, "error");
+      setSyncMessage(error instanceof Error ? error.message : "Sync failed");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const renderPicker = (label: string, selectedId: string, role: "actor" | "receiver") => (
+    <div className="field">
+      <label>{label}</label>
+      {activePlayers.length === 0 ? (
+        <p className="muted compact-copy">Select active line players to enable player tagging.</p>
+      ) : (
+        <div className="active-player-grid">
+          {activePlayers.map((player) => {
+            const unavailableReceiver = role === "receiver" && player.PlayerID === selectedActor;
+            return (
+              <button
+                key={`${role}-${player.PlayerID}`}
+                type="button"
+                className={`player-box compact ${selectedId === player.PlayerID ? "selected" : ""}`}
+                disabled={unavailableReceiver}
+                onClick={() => selectPlayer(player.PlayerID, role)}
+              >
+                <strong>{player.JerseyNumber ? `#${player.JerseyNumber}` : "--"}</strong>
+                <span>{player.FirstName} {player.LastName}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 
   return (
     <main className="app-shell">
@@ -78,255 +348,318 @@ export default function CapturePage() {
           <span>Live Capture</span>
         </Link>
         <nav className="nav" aria-label="Primary">
-          <Link href="/games">Games</Link>
+          <Link href="/">Games</Link>
           <Link href="/review">Review</Link>
         </nav>
       </header>
 
-      <section className="page">
-        <div className="scoreboard">
-          <div className="team-score">
-            <span className="muted">{state.game.AwayTeamID}</span>
-            <strong>{state.game.AwayScore}</strong>
-          </div>
-          <div>
-            <span className="status-pill">{unsynced} local</span>
-          </div>
-          <div className="team-score">
-            <span className="muted">{state.game.HomeTeamID}</span>
-            <strong>{state.game.HomeScore}</strong>
-          </div>
-        </div>
+      <section className="capture-page">
+        <div className="capture-workspace">
+          <section className="capture-main">
+            <div className="game-state-strip">
+              <span>{state.game.GameID}</span>
+              <span>Q{state.quarter === 5 ? "OT" : state.quarter}</span>
+              <span>Point {state.pointNumber}</span>
+              <span>Possession {state.possessionNumber}: {teamLabel(state.possessionTeamSide)}</span>
+              <span>{unsynced} local</span>
+            </div>
 
-        <div className="grid">
-          <aside className="panel">
-            <h2>Game State</h2>
-            <p className="muted">{state.game.GameID}</p>
-            <div className="field">
-              <label>Start Possession</label>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <select value={recordingTeam} onChange={(e) => setRecordingTeam(e.target.value as TeamSide)}>
-                  <option value="home">Home</option>
-                  <option value="away">Away</option>
-                </select>
-                <select value={selectedPresetId} onChange={(e) => setSelectedPresetId(e.target.value)}>
-                  <option value="">Select preset</option>
-                  {demoLinePresets.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.label}
-                    </option>
+            <section className="panel capture-section compact-line-panel">
+              <div className="section-heading-row">
+                <div>
+                  <h2>Active Line</h2>
+                  <p className="muted compact-subtitle">Recording for {teamLabel(recordingTeam)}</p>
+                </div>
+                <div className="segmented-control" aria-label="Recording team">
+                  <button
+                    type="button"
+                    className={recordingTeam === "home" ? "selected" : ""}
+                    onClick={() => changeRecordingTeam("home")}
+                  >
+                    Home · {state.game.HomeTeamID}
+                  </button>
+                  <button
+                    type="button"
+                    className={recordingTeam === "away" ? "selected" : ""}
+                    onClick={() => changeRecordingTeam("away")}
+                  >
+                    Away · {state.game.AwayTeamID}
+                  </button>
+                </div>
+              </div>
+
+              <div className="line-preset-grid">
+                {activeTeamPresets.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={`line-preset-button ${activeLineId === preset.id ? "selected" : ""}`}
+                    onClick={() => chooseActivePreset(preset.id)}
+                  >
+                    <strong>{preset.label}</strong>
+                    <span>{preset.playerIds.length}/7 players</span>
+                  </button>
+                ))}
+              </div>
+
+              {activePlayers.length === 0 ? (
+                <p className="muted compact-copy">Choose a line preset or open Edit Lines to set who is on the field.</p>
+              ) : (
+                <div className="active-line-strip">
+                  {activePlayers.map((player) => (
+                    <div key={`active-${player.PlayerID}`} className="player-box active-display">
+                      <strong>{player.JerseyNumber ? `#${player.JerseyNumber}` : "--"}</strong>
+                      <span>{player.FirstName} {player.LastName}</span>
+                    </div>
                   ))}
-                </select>
+                </div>
+              )}
+
+              <button type="button" className="button full-width" onClick={() => setEditingLines((open) => !open)}>
+                {editingLines ? "Hide Line Editor" : "Edit Lines"}
+              </button>
+
+              {editingLines ? (
+                <div className="line-editor-drawer">
+                  {recordingTeamPlayers.length === 0 ? (
+                    <p className="muted compact-copy">No roster loaded for this custom team.</p>
+                  ) : (
+                    activeTeamPresets.map((preset) => (
+                      <div key={`editor-${preset.id}`} className="line-editor-slot">
+                        <div className="section-heading-row">
+                          <h3>{preset.label}</h3>
+                          <span className="muted">{preset.playerIds.length}/7 selected</span>
+                        </div>
+                        <div className="player-box-grid compact-roster">
+                          {recordingTeamPlayers.map((player) => {
+                            const selected = preset.playerIds.includes(player.PlayerID);
+                            const disabled = !selected && preset.playerIds.length >= 7;
+                            return (
+                              <button
+                                key={`${preset.id}-${player.PlayerID}`}
+                                type="button"
+                                className={`player-box ${selected ? "selected" : ""}`}
+                                disabled={disabled}
+                                onClick={() => togglePresetSelection(preset.id, player.PlayerID)}
+                              >
+                                <strong>{player.JerseyNumber ? `#${player.JerseyNumber}` : "--"}</strong>
+                                <span>{player.FirstName} {player.LastName}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              ) : null}
+            </section>
+
+            <div className="field-entry-row">
+              <section className="panel event-rail-panel">
+                <h2>Events</h2>
+                <div className="event-buttons event-rail">
+                  {eventButtons.map((button) => (
+                    <button
+                      key={`${button.eventType}-${button.label}`}
+                      type="button"
+                      className={
+                        button.eventType === selectedEvent.eventType && (button.teamSide ?? null) === (selectedEvent.teamSide ?? null)
+                          ? "selected"
+                          : ""
+                      }
+                      onClick={() => setSelectedEvent(button)}
+                    >
+                      {button.label}
+                    </button>
+                  ))}
+                </div>
+              </section>
+
+              <section className="panel capture-section field-panel">
+                <div className="section-heading-row">
+                  <h1>Field Position</h1>
+                  <div className="field-map-coords">
+                    {selectedFieldCoordinate ? `x: ${selectedFieldCoordinate.x}%, y: ${selectedFieldCoordinate.y}%` : "No location selected"}
+                    {selectedFieldCoordinate ? (
+                      <button type="button" className="button small" onClick={() => setSelectedFieldCoordinate(null)}>
+                        Clear
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="field-map large" onClick={onFieldClick} role="button" aria-label="Select field position">
+                  <img src="/field-diagram.svg" alt="Field diagram" className="field-map-image" />
+                  <svg className="field-trace-layer" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                    {tracePoints.length > 1 ? (
+                      <polyline
+                        points={tracePoints.map((point) => `${point.x},${point.y}`).join(" ")}
+                        fill="none"
+                        stroke="rgba(254,243,199,0.9)"
+                        strokeWidth="0.7"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    ) : null}
+                  </svg>
+                  {tracePoints.map((point, index) => (
+                    <div
+                      key={`${point.eventSeq}-${point.eventType}`}
+                      className={`field-trace-dot ${point.eventType}`}
+                      style={{ left: `${point.x}%`, top: `${point.y}%` }}
+                    >
+                      {index + 1}
+                    </div>
+                  ))}
+                  {selectedFieldCoordinate ? (
+                    <div
+                      className="field-map-marker pending"
+                      style={{ left: `${selectedFieldCoordinate.x}%`, top: `${selectedFieldCoordinate.y}%` }}
+                    >
+                      {tracePoints.length + 1}
+                    </div>
+                  ) : (
+                    <div className="field-map-hint">Tap the field to place throw/catch location</div>
+                  )}
+                </div>
+              </section>
+            </div>
+
+            <section className="panel capture-section player-action-panel">
+              <h2>Player Selection</h2>
+
+              <div className={selectedEvent.eventType === "throw" ? "player-picker-grid two" : "player-picker-grid"}>
+                {renderPicker(selectedEvent.eventType === "throw" ? "Thrower" : "Player", selectedActor, "actor")}
+                {selectedEvent.eventType === "throw" ? renderPicker("Receiver", selectedReceiver, "receiver") : null}
+              </div>
+
+              <button className="button primary record-button" type="button" disabled={recordDisabled} onClick={() => recordEvent()}>
+                Record {selectedEvent.label}
+              </button>
+              {recordDisabled ? (
+                <div className="muted" style={{ marginTop: 8 }}>
+                  Select a field coordinate before recording this event.
+                </div>
+              ) : null}
+            </section>
+          </section>
+
+          <aside className="capture-side-rail">
+            <section className="panel side-status-card compact-clock-card">
+              <span className="muted">Game Clock</span>
+              <strong>{formatClock(secondsRemaining)}</strong>
+              <div className="clock-actions">
+                <button
+                  type="button"
+                  className={`button ${isClockRunning ? "" : "primary"}`}
+                  onClick={() => setIsClockRunning((running) => !running)}
+                  disabled={secondsRemaining === 0}
+                >
+                  {isClockRunning ? "Stop" : "Start"}
+                </button>
                 <button
                   type="button"
                   className="button"
                   onClick={() => {
-                    const preset = demoLinePresets.find((p) => p.id === selectedPresetId);
-                    const offensive = preset ? preset.playerIds : [];
-                    setSelectedOffenseLine(offensive);
-                    dispatch({
-                      type: "record_event",
-                      eventType: "possession_start",
-                      teamSide: recordingTeam,
-                      offensiveLinePlayerIds: offensive,
-                      payload: {}
-                    });
+                    setIsClockRunning(false);
+                    setSecondsRemaining(CLOCK_START_SECONDS);
                   }}
                 >
-                  Start Possession
+                  Reset
                 </button>
               </div>
-            </div>
-              <label>Quarter</label>
-              <input readOnly value={state.quarter} />
-            </div>
-            <div className="field">
-              <label>Point</label>
-              <input readOnly value={state.pointNumber} />
-            </div>
-            <div className="field">
-              <label>Possession</label>
-              <input readOnly value={`${state.possessionTeamSide} #${state.possessionNumber}`} />
-            </div>
-            <button className="button danger" onClick={() => dispatch({ type: "undo_last" })}>
-              Undo Last
-            </button>
-          </aside>
+            </section>
 
-          <section className="panel">
-            <h1>Event Entry</h1>
-            <div className="field">
-              <label>Offensive line</label>
-              <div className="player-selection">
-                {state.players.map((player) => (
-                  <label key={`offense-${player.PlayerID}`} className="checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={selectedOffenseLine.includes(player.PlayerID)}
-                      onChange={() => toggleLineSelection(player.PlayerID, "offense")}
-                    />
-                    {playerLabel(player)}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="field">
-              <label>Defensive line</label>
-              <div className="player-selection">
-                {state.players.map((player) => (
-                  <label key={`defense-${player.PlayerID}`} className="checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={selectedDefenseLine.includes(player.PlayerID)}
-                      onChange={() => toggleLineSelection(player.PlayerID, "defense")}
-                    />
-                    {playerLabel(player)}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="field">
-              <label>Thrower</label>
-              <select value={selectedThrower} onChange={(event) => setSelectedThrower(event.target.value)}>
-                <option value="">Select thrower</option>
-                {state.players.map((player) => (
-                  <option key={`thrower-${player.PlayerID}`} value={player.PlayerID}>
-                    {playerLabel(player)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="field">
-              <label>Field position</label>
-              <div className="field-map" onClick={onFieldClick} role="button" aria-label="Select field position">
-                <img src="/field-diagram.svg" alt="Field diagram" className="field-map-image" />
-                {selectedFieldCoordinate ? (
-                  <div
-                    className="field-map-marker"
-                    style={{ left: `${selectedFieldCoordinate.x}%`, top: `${selectedFieldCoordinate.y}%` }}
-                  />
-                ) : (
-                  <div className="field-map-hint">Click to place throw/catch location</div>
-                )}
-              </div>
-              <div className="field-map-coords">
-                {selectedFieldCoordinate ? `x: ${selectedFieldCoordinate.x}%, y: ${selectedFieldCoordinate.y}%` : "No location selected"}
-                {selectedFieldCoordinate ? (
-                  <button type="button" className="button small" onClick={() => setSelectedFieldCoordinate(null)}>
-                    Clear
-                  </button>
-                ) : null}
-              </div>
-            </div>
-            <div className="field event-type-picker">
-              <label>Outcome</label>
-              <div className="event-buttons">
-                {eventButtons.map((button) => (
-                  <button
-                    key={`${button.eventType}-${button.label}`}
-                    type="button"
-                    className={button.eventType === selectedEvent.eventType ? "selected" : ""}
-                    onClick={() => setSelectedEvent(button)}
-                  >
-                    {button.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="field horizontal-grid">
-              <div>
-                <label>{selectedEvent.eventType === "throw" ? "Thrower" : "Player"}</label>
-                <select value={selectedThrower} onChange={(event) => setSelectedThrower(event.target.value)}>
-                  <option value="">Select player</option>
-                  {state.players.map((player) => (
-                    <option key={`player-${player.PlayerID}`} value={player.PlayerID}>
-                      {playerLabel(player)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {selectedEvent.eventType === "throw" ? (
+            <section className="panel side-status-card compact-score-card">
+              <span className="muted">Score</span>
+              <div className="compact-score-grid">
                 <div>
-                  <label>Receiver</label>
-                  <select value={selectedReceiver} onChange={(event) => setSelectedReceiver(event.target.value)}>
-                    <option value="">Select receiver</option>
-                    {state.players.map((player) => (
-                      <option key={`receiver-${player.PlayerID}`} value={player.PlayerID}>
-                        {playerLabel(player)}
-                      </option>
-                    ))}
-                  </select>
+                  <span>{state.game.AwayTeamID}</span>
+                  <strong>{state.game.AwayScore}</strong>
                 </div>
-              ) : null}
-            </div>
-            <button
-              className="button primary full-width"
-              type="button"
-              disabled={recordDisabled}
-              onClick={() => {
-                const actorForDispatch = selectedEvent.eventType === "catch" ? selectedThrower || undefined : undefined;
-                const targetForDispatch = selectedEvent.eventType === "throw" ? selectedReceiver || undefined : undefined;
-                dispatch({
-                  type: "record_event",
-                  eventType: selectedEvent.eventType,
-                  teamSide: selectedEvent.teamSide,
-                  actorPlayerId: actorForDispatch,
-                  targetPlayerId: targetForDispatch,
-                  offensiveLinePlayerIds: selectedEvent.eventType === "point_start" ? selectedOffenseLine : undefined,
-                  defensiveLinePlayerIds: selectedEvent.eventType === "point_start" ? selectedDefenseLine : undefined,
-                  fieldX: ["throw", "catch"].includes(selectedEvent.eventType) ? selectedFieldCoordinate?.x : undefined,
-                  fieldY: ["throw", "catch"].includes(selectedEvent.eventType) ? selectedFieldCoordinate?.y : undefined,
-                  payload: {}
-                });
-                setSelectedFieldCoordinate(null);
-              }}
-            >
-              Record {selectedEvent.label}
-            </button>
-            {recordDisabled ? (
-              <div className="muted" style={{ marginTop: 8 }}>
-                Select a field coordinate before recording this event.
+                <div>
+                  <span>{state.game.HomeTeamID}</span>
+                  <strong>{state.game.HomeScore}</strong>
+                </div>
               </div>
-            ) : null}
-          </section>
+            </section>
 
-          <aside className="panel">
-            <h2>Timeline</h2>
-            <div className="timeline">
-              {state.events.length === 0 ? (
-                <p className="muted">No events recorded yet.</p>
-              ) : (
-                state.events
-                  .slice()
-                  .reverse()
-                  .map((event) => (
-                    <div className="timeline-item" key={event.clientEventId}>
-                      <strong>#{event.eventSeq} {event.eventType}</strong>
-                      <div className="muted">
-                        {event.awayScore}-{event.homeScore} · Q{event.quarter} P{event.pointNumber} · {event.syncStatus}
-                      </div>
-                      {event.offensiveLinePlayerIds || event.defensiveLinePlayerIds ? (
+            <section className="panel side-controls-card">
+              <label className={`auto-record-control ${autoRecordEnabled ? "enabled" : ""}`}>
+                <span>Auto Record</span>
+                <input
+                  type="checkbox"
+                  checked={autoRecordEnabled}
+                  onChange={(event) => setAutoRecordEnabled(event.target.checked)}
+                />
+              </label>
+              <label className="quarter-control side-quarter-control">
+                <span>Quarter</span>
+                <select
+                  value={state.quarter}
+                  onChange={(event) => dispatch({ type: "set_quarter", quarter: Number(event.target.value) })}
+                >
+                  <option value={1}>1</option>
+                  <option value={2}>2</option>
+                  <option value={3}>3</option>
+                  <option value={4}>4</option>
+                  <option value={5}>OT</option>
+                </select>
+              </label>
+              <button className="button full-width" onClick={endPossession}>
+                End Possession
+              </button>
+              <button className="button danger full-width" onClick={() => dispatch({ type: "undo_last" })}>
+                Undo Last
+              </button>
+              <button className="button primary full-width" onClick={syncEvents} disabled={isSyncing || unsynced === 0}>
+                {isSyncing ? "Syncing..." : `Sync ${unsynced}`}
+              </button>
+              <p className="muted compact-copy">{syncMessage}</p>
+            </section>
+
+            <section className="panel event-log-panel">
+              <h2>Event Log</h2>
+              <div className="timeline">
+                {state.events.length === 0 ? (
+                  <p className="muted">No events recorded yet.</p>
+                ) : (
+                  state.events
+                    .slice()
+                    .reverse()
+                    .map((event) => (
+                      <div className="timeline-item" key={event.clientEventId}>
+                        <strong>#{event.eventSeq} {event.eventType}</strong>
+                        <div className="muted">
+                          {event.awayScore}-{event.homeScore} · Q{event.quarter} P{event.pointNumber} · Poss {event.possessionNumber}
+                        </div>
                         <div className="timeline-meta">
+                          <div>Clock: {event.gameClockSecondsRemaining !== undefined ? formatClock(event.gameClockSecondsRemaining) : "--:--"}</div>
+                          <div>Team: {event.teamId ?? event.teamSide ?? "Unknown"}</div>
+                          {event.actorPlayerId ? <div>Player: {playerName(event.actorPlayerId)}</div> : null}
+                          {event.targetPlayerId ? <div>Receiver: {playerName(event.targetPlayerId)}</div> : null}
                           {event.offensiveLinePlayerIds ? <div>Offense: {lineLabels(event.offensiveLinePlayerIds)}</div> : null}
                           {event.defensiveLinePlayerIds ? <div>Defense: {lineLabels(event.defensiveLinePlayerIds)}</div> : null}
-                        </div>
-                      ) : null}
-                      {(event.eventType === "throw" || event.eventType === "catch") ? (
-                        <div className="timeline-meta">
-                          {event.actorPlayerId ? <div>Thrower: {playerName(event.actorPlayerId)}</div> : null}
-                          {event.targetPlayerId ? <div>Receiver: {playerName(event.targetPlayerId)}</div> : null}
                           {event.fieldX !== undefined && event.fieldY !== undefined ? (
                             <div>Location: x {event.fieldX}%, y {event.fieldY}%</div>
                           ) : null}
                         </div>
-                      ) : null}
-                    </div>
-                  ))
-              )}
-            </div>
+                      </div>
+                    ))
+                )}
+              </div>
+            </section>
           </aside>
         </div>
       </section>
     </main>
+  );
+}
+
+export default function CapturePage() {
+  return (
+    <Suspense fallback={<main className="app-shell"><section className="page">Loading capture...</section></main>}>
+      <CapturePageContent />
+    </Suspense>
   );
 }

@@ -31,6 +31,11 @@ One row per scorer-entered event.
 - `team_id`
 - `actor_player_id`
 - `target_player_id`
+- `offensive_line_player_ids`
+- `defensive_line_player_ids`
+- `field_x`
+- `field_y`
+- `game_clock_seconds_remaining`
 - `quarter`
 - `point_number`
 - `possession_number`
@@ -44,6 +49,10 @@ One row per scorer-entered event.
 ### `manual_event_audit`
 
 Immutable audit trail for edits, deletes, sync attempts, and reviewer actions.
+
+## Supabase Migration
+
+The staging schema lives in `supabase/migrations/0001_manual_staging.sql`. The app writes through the Next.js API route with `SUPABASE_SERVICE_ROLE_KEY`; the browser never receives the service role key.
 
 ## Promotion Rule
 

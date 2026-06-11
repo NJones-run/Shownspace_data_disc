@@ -3,6 +3,7 @@ export type TeamSide = "home" | "away";
 export type ManualEventType =
   | "point_start"
   | "possession_start"
+  | "possession_end"
   | "pull"
   | "throw"
   | "catch"
@@ -60,6 +61,7 @@ export interface ManualEvent {
   defensiveLinePlayerIds?: string[];
   fieldX?: number;
   fieldY?: number;
+  gameClockSecondsRemaining?: number;
   quarter: number;
   pointNumber: number;
   possessionNumber: number;
@@ -92,9 +94,11 @@ export type CaptureAction =
       defensiveLinePlayerIds?: string[];
       fieldX?: number;
       fieldY?: number;
+      gameClockSecondsRemaining?: number;
       payload?: Record<string, unknown>;
     }
   | { type: "undo_last" }
+  | { type: "set_quarter"; quarter: number }
   | { type: "mark_queued"; clientEventIds: string[] }
   | { type: "mark_synced"; clientEventIds: string[] }
   | { type: "mark_error"; clientEventIds: string[] };

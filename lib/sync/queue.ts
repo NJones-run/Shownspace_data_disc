@@ -1,4 +1,4 @@
-import { listQueuedEvents } from "@/lib/db/indexed-db";
+import { listQueuedEvents, updateEventSyncStatus } from "@/lib/db/indexed-db";
 import type { ManualEvent } from "@/lib/event-model/types";
 
 export interface SyncResult {
@@ -23,6 +23,14 @@ export async function pushQueuedEvents(sessionId: string, gameId: string): Promi
   }
 
   return response.json() as Promise<SyncResult>;
+}
+
+export async function markQueuedEventsSynced(clientEventIds: string[]) {
+  await updateEventSyncStatus(clientEventIds, "synced");
+}
+
+export async function queueEventsForSync(clientEventIds: string[]) {
+  await updateEventSyncStatus(clientEventIds, "queued");
 }
 
 export function eventsToSyncPayload(events: ManualEvent[]) {

@@ -8,6 +8,7 @@ export const manualEventSchema = z.object({
   eventType: z.enum([
     "point_start",
     "possession_start",
+    "possession_end",
     "pull",
     "throw",
     "catch",
@@ -28,6 +29,7 @@ export const manualEventSchema = z.object({
   defensiveLinePlayerIds: z.array(z.string()).optional(),
   fieldX: z.number().min(0).max(100).optional(),
   fieldY: z.number().min(0).max(100).optional(),
+  gameClockSecondsRemaining: z.number().int().min(0).optional(),
   quarter: z.number().int().positive(),
   pointNumber: z.number().int().positive(),
   possessionNumber: z.number().int().positive(),
@@ -41,6 +43,8 @@ export const manualEventSchema = z.object({
 export const manualEventBatchSchema = z.object({
   sessionId: z.string().min(1),
   gameId: z.string().min(1),
+  deviceId: z.string().optional(),
+  scorerName: z.string().optional(),
   events: z.array(manualEventSchema).min(1)
 });
 
