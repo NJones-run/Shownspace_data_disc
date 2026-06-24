@@ -99,10 +99,15 @@ export default function HomePage() {
   };
 
   useEffect(() => {
-    createBrowserSupabaseClient()
-      .auth.getSession()
-      .then(({ data }) => setSessionEmail(data.session?.user.email ?? ""))
-      .catch(() => setSessionEmail(""));
+    try {
+      createBrowserSupabaseClient()
+        .auth.getSession()
+        .then(({ data }) => setSessionEmail(data.session?.user.email ?? ""))
+        .catch(() => setSessionEmail(""));
+    } catch (error) {
+      setSessionEmail("");
+      setMessage(error instanceof Error ? error.message : "Unable to initialize manager sign-in.");
+    }
     void refreshTeams().catch((error) => setMessage(error instanceof Error ? error.message : "Unable to load teams"));
   }, []);
 
