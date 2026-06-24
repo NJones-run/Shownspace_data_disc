@@ -12,6 +12,7 @@ export const manualEventSchema = z.object({
     "pull",
     "throw",
     "catch",
+    "tipped_self_catch",
     "drop",
     "block",
     "turnover",
@@ -45,6 +46,10 @@ export const manualEventBatchSchema = z.object({
   gameId: z.string().min(1),
   deviceId: z.string().optional(),
   scorerName: z.string().optional(),
+  trackedTeamId: z.string().optional(),
+  opponentName: z.string().optional(),
+  gameDate: z.string().optional(),
+  tournamentName: z.string().optional(),
   events: z.array(manualEventSchema).min(1)
 });
 

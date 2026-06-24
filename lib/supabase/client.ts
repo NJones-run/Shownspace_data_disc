@@ -7,6 +7,9 @@ export function createServerSupabaseClient() {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   }
   return createClient(url, key, {
+    db: {
+      schema: "data_disc"
+    },
     auth: {
       persistSession: false
     }

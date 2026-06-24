@@ -5,24 +5,26 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { saveEvents, updateEventSyncStatus } from "@/lib/db/indexed-db";
 import { getCurrentPossessionTrace } from "@/lib/event-model/field-trace";
+import { getRecordEventBlockReason } from "@/lib/event-model/recording-rules";
 import { captureReducer } from "@/lib/event-model/reducer";
-import { createCustomState, createDemoState, demoGame, demoLinePresets } from "@/lib/event-model/fixtures";
+import { createCaptureState, createCustomState, createDemoState, demoGame, demoLinePresets } from "@/lib/event-model/fixtures";
 import { seedLinePresets, togglePresetPlayer, type LinePresetsByTeam } from "@/lib/event-model/line-presets";
-import type { CapturePlayer, CaptureState, ManualEventType, TeamSide } from "@/lib/event-model/types";
+import type { CapturePlayer, CaptureState, ManualEvent, ManualEventType, RulesMode, TeamSide } from "@/lib/event-model/types";
 import { markQueuedEventsSynced, pushQueuedEvents } from "@/lib/sync/queue";
+import { createBrowserSupabaseClient } from "@/lib/supabase/browser-client";
+import { scorerTokenHeader } from "@/lib/team-library/client-access";
 
 const CLOCK_START_SECONDS = 15 * 60;
+const FIELD_ASPECT_RATIO = 2;
 
 const eventButtons: Array<{ label: string; eventType: ManualEventType; teamSide?: TeamSide }> = [
   { label: "Throw", eventType: "throw" },
-  { label: "Catch", eventType: "catch" },
+  { label: "Tipped Self Catch", eventType: "tipped_self_catch" },
   { label: "Drop", eventType: "drop" },
   { label: "Block", eventType: "block" },
   { label: "Turnover", eventType: "turnover" },
-  { label: "Home Goal", eventType: "goal", teamSide: "home" },
-  { label: "Away Goal", eventType: "goal", teamSide: "away" },
+  { label: "Goal", eventType: "goal" },
   { label: "Pull", eventType: "pull" },
-  { label: "Point Start", eventType: "point_start" },
   { label: "Line Change", eventType: "line_change" },
   { label: "Timeout", eventType: "timeout" },
   { label: "Penalty", eventType: "penalty" }
@@ -41,9 +43,29 @@ function formatClock(seconds: number) {
   return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
+function parseClock(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const parts = trimmed.split(":");
+  if (parts.length === 1) {
+    const seconds = Number(parts[0]);
+    return Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds) : undefined;
+  }
+  if (parts.length !== 2) return undefined;
+  const minutes = Number(parts[0]);
+  const seconds = Number(parts[1]);
+  if (!Number.isInteger(minutes) || !Number.isInteger(seconds) || minutes < 0 || seconds < 0 || seconds > 59) {
+    return undefined;
+  }
+  return minutes * 60 + seconds;
+}
+
 function createInitialState(gameId: string | null, awayTeam: string | null, homeTeam: string | null): CaptureState {
   if (gameId === "custom") {
     return createCustomState(awayTeam ?? "Away", homeTeam ?? "Home");
+  }
+  if (gameId === "shared") {
+    return createCustomState("Away", "Home");
   }
   return createDemoState();
 }
@@ -75,30 +97,84 @@ function CapturePageContent() {
   const [selectedFieldCoordinate, setSelectedFieldCoordinate] = useState<{ x: number; y: number } | null>(null);
   const [selectedEvent, setSelectedEvent] = useState(eventButtons[0]);
   const [autoRecordEnabled, setAutoRecordEnabled] = useState(false);
-  const [secondsRemaining, setSecondsRemaining] = useState(CLOCK_START_SECONDS);
-  const [isClockRunning, setIsClockRunning] = useState(false);
+  const [clockInput, setClockInput] = useState("");
+  const [eventClockInputs, setEventClockInputs] = useState<Record<string, string>>({});
+  const [syncAfterGoal, setSyncAfterGoal] = useState(false);
   const [syncMessage, setSyncMessage] = useState("Ready");
   const [isSyncing, setIsSyncing] = useState(false);
   const persistedEventIds = useRef(new Set<string>());
   const unsynced = state.events.filter((event) => event.syncStatus !== "synced").length;
-  const requiresFieldCoord = ["throw", "catch"].includes(selectedEvent.eventType);
-  const recordDisabled = requiresFieldCoord && !selectedFieldCoordinate;
+  const clockEnabled = state.rulesMode === "ufa";
+  const possessionClock = state.gameClockSecondsRemaining;
+  const recordBlockReason = getRecordEventBlockReason({
+    eventType: selectedEvent.eventType,
+    actorPlayerId: selectedActor || undefined,
+    targetPlayerId: selectedReceiver || undefined,
+    hasFieldCoordinate: Boolean(selectedFieldCoordinate),
+    clockRequired: clockEnabled,
+    clockSet: possessionClock !== undefined
+  });
+  const recordDisabled = Boolean(recordBlockReason);
   const tracePoints = useMemo(() => getCurrentPossessionTrace(state.events), [state.events]);
 
   useEffect(() => {
-    if (!isClockRunning) return;
-    const intervalId = window.setInterval(() => {
-      setSecondsRemaining((current) => {
-        if (current <= 1) {
-          window.clearInterval(intervalId);
-          setIsClockRunning(false);
-          return 0;
+    if (searchParams.get("gameId") !== "shared") return;
+    const teamId = searchParams.get("teamId");
+    const opponentName = searchParams.get("opponentName");
+    const gameDate = searchParams.get("gameDate");
+    const tournamentName = searchParams.get("tournamentName");
+    if (!teamId || !opponentName || !gameDate) return;
+
+    const loadSharedGame = async () => {
+      const headers: Record<string, string> = {};
+      const tokens = scorerTokenHeader();
+      if (tokens) headers["x-scorer-tokens"] = tokens;
+      try {
+        const session = await createBrowserSupabaseClient().auth.getSession();
+        const accessToken = session.data.session?.access_token;
+        if (accessToken) headers.authorization = `Bearer ${accessToken}`;
+      } catch {
+        // Public env vars are optional for score-only invite users.
+      }
+      const params = new URLSearchParams({ teamId, opponentName, gameDate });
+      if (tournamentName) params.set("tournamentName", tournamentName);
+      const response = await fetch(`/api/game-package/shared?${params.toString()}`, { headers });
+      if (!response.ok) {
+        setSyncMessage(`Unable to load shared teams: ${response.status}`);
+        return;
+      }
+      const packageData = await response.json();
+      dispatch({ type: "replace_state", state: createCaptureState(packageData.game, packageData.players) });
+      setLinePresets(seedLinePresets([], []));
+      setRecordingTeam("home");
+      setSelectedActor("");
+      setSelectedReceiver("");
+      setSelectedFieldCoordinate(null);
+    };
+
+    void loadSharedGame();
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!clockEnabled) {
+      setClockInput("");
+      return;
+    }
+    setClockInput(possessionClock !== undefined ? formatClock(possessionClock) : "");
+  }, [clockEnabled, possessionClock]);
+
+  useEffect(() => {
+    setEventClockInputs((current) => {
+      const next = { ...current };
+      state.events.forEach((event) => {
+        if (!(event.clientEventId in next)) {
+          next[event.clientEventId] =
+            event.gameClockSecondsRemaining !== undefined ? formatClock(event.gameClockSecondsRemaining) : "";
         }
-        return current - 1;
       });
-    }, 1000);
-    return () => window.clearInterval(intervalId);
-  }, [isClockRunning]);
+      return next;
+    });
+  }, [state.events]);
 
   useEffect(() => {
     const newEvents = state.events.filter((event) => !persistedEventIds.current.has(event.clientEventId));
@@ -148,7 +224,10 @@ function CapturePageContent() {
   const lineLabels = (playerIds?: string[]) =>
     playerIds?.map(playerName).filter(Boolean).join(", ") ?? "";
 
-  const teamLabel = (side: TeamSide) => (side === "home" ? state.game.HomeTeamID : state.game.AwayTeamID);
+  const teamLabel = (side: TeamSide) =>
+    side === "home" ? `My Team · ${state.game.HomeTeamID}` : `Opponent · ${state.game.opponentName ?? state.game.AwayTeamID}`;
+  const shortTeamLabel = (side: TeamSide) => (side === "home" ? "My Team" : "Opponent");
+  const teamName = (side: TeamSide) => (side === "home" ? state.game.HomeTeamID : state.game.opponentName ?? state.game.AwayTeamID);
 
   const changeRecordingTeam = (teamSide: TeamSide) => {
     setRecordingTeam(teamSide);
@@ -183,9 +262,9 @@ function CapturePageContent() {
     fieldCoordinate: { x: number; y: number } | null
   ) => {
     if (eventType === "throw") {
-      return Boolean(actorPlayerId && targetPlayerId && fieldCoordinate);
+      return Boolean(actorPlayerId && targetPlayerId && actorPlayerId !== targetPlayerId && fieldCoordinate);
     }
-    if (eventType === "catch") {
+    if (eventType === "tipped_self_catch") {
       return Boolean(actorPlayerId && fieldCoordinate);
     }
     return Boolean(actorPlayerId);
@@ -215,13 +294,19 @@ function CapturePageContent() {
 
   const onFieldClick = (event: MouseEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) / rect.width) * 100;
-    const y = ((event.clientY - rect.top) / rect.height) * 100;
+    const containerAspect = rect.width / rect.height;
+    const imageWidth = containerAspect > FIELD_ASPECT_RATIO ? rect.height * FIELD_ASPECT_RATIO : rect.width;
+    const imageHeight = containerAspect > FIELD_ASPECT_RATIO ? rect.height : rect.width / FIELD_ASPECT_RATIO;
+    const imageLeft = rect.left + (rect.width - imageWidth) / 2;
+    const imageTop = rect.top + (rect.height - imageHeight) / 2;
+    const x = ((event.clientX - imageLeft) / imageWidth) * 100;
+    const y = ((event.clientY - imageTop) / imageHeight) * 100;
+    if (x < 0 || x > 100 || y < 0 || y > 100) return;
     const nextCoordinate = { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)) };
     setSelectedFieldCoordinate(nextCoordinate);
     if (
       autoRecordEnabled &&
-      ["throw", "catch"].includes(selectedEvent.eventType) &&
+      ["throw", "tipped_self_catch"].includes(selectedEvent.eventType) &&
       hasAutoRecordDetails(selectedEvent.eventType, selectedActor, selectedReceiver, nextCoordinate)
     ) {
       recordEvent({ fieldCoordinate: nextCoordinate });
@@ -233,6 +318,18 @@ function CapturePageContent() {
     const fieldCoordinate = options.fieldCoordinate !== undefined ? options.fieldCoordinate : selectedFieldCoordinate;
     const actorForDispatch = (options.actorPlayerId ?? selectedActor) || undefined;
     const targetForDispatch = eventType === "throw" ? (options.targetPlayerId ?? selectedReceiver) || undefined : undefined;
+    const blockReason = getRecordEventBlockReason({
+      eventType,
+      actorPlayerId: actorForDispatch,
+      targetPlayerId: targetForDispatch,
+      hasFieldCoordinate: Boolean(fieldCoordinate),
+      clockRequired: clockEnabled,
+      clockSet: possessionClock !== undefined
+    });
+    if (blockReason) {
+      setSyncMessage(blockReason);
+      return;
+    }
     const possessionBoundary = ["block", "goal", "turnover"].includes(eventType);
     dispatch({
       type: "record_event",
@@ -240,18 +337,17 @@ function CapturePageContent() {
       teamSide: selectedEvent.teamSide ?? recordingTeam,
       actorPlayerId: actorForDispatch,
       targetPlayerId: targetForDispatch,
-      offensiveLinePlayerIds: eventType === "point_start" ? activeLinePlayerIds : undefined,
-      fieldX: ["throw", "catch"].includes(eventType) ? fieldCoordinate?.x : undefined,
-      fieldY: ["throw", "catch"].includes(eventType) ? fieldCoordinate?.y : undefined,
-      gameClockSecondsRemaining: secondsRemaining,
-      payload: {}
+      offensiveLinePlayerIds: eventType === "pull" ? activeLinePlayerIds : undefined,
+      fieldX: ["throw", "tipped_self_catch"].includes(eventType) ? fieldCoordinate?.x : undefined,
+      fieldY: ["throw", "tipped_self_catch"].includes(eventType) ? fieldCoordinate?.y : undefined,
+      gameClockSecondsRemaining: clockEnabled ? possessionClock : undefined,
+      payload: eventType === "tipped_self_catch" ? { eventNote: "tipped_self_catch" } : {}
     });
+    if (eventType === "goal" && autoRecordEnabled) {
+      setSyncAfterGoal(true);
+    }
     setSelectedFieldCoordinate(null);
-    if (eventType === "catch" && actorForDispatch) {
-      setSelectedActor(actorForDispatch);
-      setSelectedReceiver("");
-      setSelectedEvent(eventButtons.find((button) => button.eventType === "throw") ?? selectedEvent);
-    } else if (eventType === "throw" && targetForDispatch) {
+    if (eventType === "throw" && targetForDispatch) {
       setSelectedActor(targetForDispatch);
       setSelectedReceiver("");
     } else if (possessionBoundary) {
@@ -265,11 +361,45 @@ function CapturePageContent() {
       type: "record_event",
       eventType: "possession_end",
       teamSide: recordingTeam,
-      gameClockSecondsRemaining: secondsRemaining,
+      gameClockSecondsRemaining: clockEnabled ? possessionClock : undefined,
       payload: {}
     });
     setSelectedFieldCoordinate(null);
     setSelectedReceiver("");
+  };
+
+  const setRulesMode = (rulesMode: RulesMode) => {
+    dispatch({ type: "set_rules_mode", rulesMode });
+    if (rulesMode === "club") {
+      dispatch({ type: "set_game_clock", secondsRemaining: undefined });
+    }
+  };
+
+  const updateClockFromInput = () => {
+    const nextClock = parseClock(clockInput);
+    if (nextClock === undefined) {
+      setSyncMessage("Enter clock as MM:SS.");
+      return;
+    }
+    dispatch({ type: "set_game_clock", secondsRemaining: nextClock });
+    setSyncMessage(`Clock updated to ${formatClock(nextClock)}`);
+  };
+
+  const editEventClock = async (event: ManualEvent) => {
+    const input = eventClockInputs[event.clientEventId] ?? "";
+    const nextClock = parseClock(input);
+    if (nextClock === undefined) {
+      setSyncMessage("Enter event clock as MM:SS.");
+      return;
+    }
+    const updatedEvent = {
+      ...event,
+      gameClockSecondsRemaining: nextClock,
+      syncStatus: event.syncStatus === "synced" ? "local" as const : event.syncStatus
+    };
+    dispatch({ type: "edit_event_clock", clientEventId: event.clientEventId, secondsRemaining: nextClock });
+    await saveEvents([updatedEvent]);
+    setSyncMessage(`Updated event #${event.eventSeq} clock`);
   };
 
   const syncEvents = async () => {
@@ -287,7 +417,7 @@ function CapturePageContent() {
 
     try {
       await saveEvents(queuedEvents);
-      const result = await pushQueuedEvents(state.session.sessionId, state.game.GameID);
+      const result = await pushQueuedEvents(state.session);
       if (result.acceptedClientEventIds.length) {
         dispatch({ type: "mark_synced", clientEventIds: result.acceptedClientEventIds });
         await markQueuedEventsSynced(result.acceptedClientEventIds);
@@ -312,6 +442,12 @@ function CapturePageContent() {
       setIsSyncing(false);
     }
   };
+
+  useEffect(() => {
+    if (!syncAfterGoal) return;
+    setSyncAfterGoal(false);
+    void syncEvents();
+  }, [syncAfterGoal, state.events]);
 
   const renderPicker = (label: string, selectedId: string, role: "actor" | "receiver") => (
     <div className="field">
@@ -358,6 +494,7 @@ function CapturePageContent() {
           <section className="capture-main">
             <div className="game-state-strip">
               <span>{state.game.GameID}</span>
+              <span>{state.rulesMode === "ufa" ? "UFA clock" : "Club rules"}</span>
               <span>Q{state.quarter === 5 ? "OT" : state.quarter}</span>
               <span>Point {state.pointNumber}</span>
               <span>Possession {state.possessionNumber}: {teamLabel(state.possessionTeamSide)}</span>
@@ -376,14 +513,14 @@ function CapturePageContent() {
                     className={recordingTeam === "home" ? "selected" : ""}
                     onClick={() => changeRecordingTeam("home")}
                   >
-                    Home · {state.game.HomeTeamID}
+                    My Team · {state.game.HomeTeamID}
                   </button>
                   <button
                     type="button"
                     className={recordingTeam === "away" ? "selected" : ""}
                     onClick={() => changeRecordingTeam("away")}
                   >
-                    Away · {state.game.AwayTeamID}
+                    Opponent · {state.game.opponentName ?? state.game.AwayTeamID}
                   </button>
                 </div>
               </div>
@@ -422,7 +559,9 @@ function CapturePageContent() {
               {editingLines ? (
                 <div className="line-editor-drawer">
                   {recordingTeamPlayers.length === 0 ? (
-                    <p className="muted compact-copy">No roster loaded for this custom team.</p>
+                    <p className="muted compact-copy">
+                      {recordingTeam === "away" ? "Opponent roster is not tracked for this capture." : "No roster loaded for this team."}
+                    </p>
                   ) : (
                     activeTeamPresets.map((preset) => (
                       <div key={`editor-${preset.id}`} className="line-editor-slot">
@@ -519,7 +658,7 @@ function CapturePageContent() {
                       {tracePoints.length + 1}
                     </div>
                   ) : (
-                    <div className="field-map-hint">Tap the field to place throw/catch location</div>
+                    <div className="field-map-hint">Tap the field to place throw location</div>
                   )}
                 </div>
               </section>
@@ -529,7 +668,15 @@ function CapturePageContent() {
               <h2>Player Selection</h2>
 
               <div className={selectedEvent.eventType === "throw" ? "player-picker-grid two" : "player-picker-grid"}>
-                {renderPicker(selectedEvent.eventType === "throw" ? "Thrower" : "Player", selectedActor, "actor")}
+                {renderPicker(
+                  selectedEvent.eventType === "throw"
+                    ? "Thrower"
+                    : selectedEvent.eventType === "tipped_self_catch"
+                    ? "Recovered by"
+                    : "Player",
+                  selectedActor,
+                  "actor"
+                )}
                 {selectedEvent.eventType === "throw" ? renderPicker("Receiver", selectedReceiver, "receiver") : null}
               </div>
 
@@ -538,7 +685,7 @@ function CapturePageContent() {
               </button>
               {recordDisabled ? (
                 <div className="muted" style={{ marginTop: 8 }}>
-                  Select a field coordinate before recording this event.
+                  {recordBlockReason}
                 </div>
               ) : null}
             </section>
@@ -546,39 +693,67 @@ function CapturePageContent() {
 
           <aside className="capture-side-rail">
             <section className="panel side-status-card compact-clock-card">
-              <span className="muted">Game Clock</span>
-              <strong>{formatClock(secondsRemaining)}</strong>
-              <div className="clock-actions">
-                <button
-                  type="button"
-                  className={`button ${isClockRunning ? "" : "primary"}`}
-                  onClick={() => setIsClockRunning((running) => !running)}
-                  disabled={secondsRemaining === 0}
-                >
-                  {isClockRunning ? "Stop" : "Start"}
+              <span className="muted">Rules Mode</span>
+              <div className="segmented-control full-width" aria-label="Rules mode">
+                <button type="button" className={state.rulesMode === "ufa" ? "selected" : ""} onClick={() => setRulesMode("ufa")}>
+                  UFA
                 </button>
-                <button
-                  type="button"
-                  className="button"
-                  onClick={() => {
-                    setIsClockRunning(false);
-                    setSecondsRemaining(CLOCK_START_SECONDS);
-                  }}
-                >
-                  Reset
+                <button type="button" className={state.rulesMode === "club" ? "selected" : ""} onClick={() => setRulesMode("club")}>
+                  Club
                 </button>
               </div>
+              {clockEnabled ? (
+                <>
+                  <span className="muted">Possession Clock</span>
+                  <strong>{possessionClock !== undefined ? formatClock(possessionClock) : "--:--"}</strong>
+                  <div className="clock-update-row">
+                    <input
+                      aria-label="Set possession clock"
+                      value={clockInput}
+                      onChange={(event) => setClockInput(event.target.value)}
+                      placeholder="MM:SS"
+                    />
+                    <button type="button" className="button" onClick={updateClockFromInput}>
+                      Set Clock
+                    </button>
+                  </div>
+                  <div className="clock-actions">
+                    <button
+                      type="button"
+                      className="button"
+                      onClick={() => {
+                        dispatch({ type: "set_game_clock", secondsRemaining: CLOCK_START_SECONDS });
+                        setSyncMessage("Possession clock set to 15:00");
+                      }}
+                    >
+                      15:00
+                    </button>
+                    <button
+                      type="button"
+                      className="button"
+                      onClick={() => {
+                        dispatch({ type: "set_game_clock", secondsRemaining: undefined });
+                        setSyncMessage("Possession clock cleared");
+                      }}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <p className="muted compact-copy">Game clock is off for club rules.</p>
+              )}
             </section>
 
             <section className="panel side-status-card compact-score-card">
               <span className="muted">Score</span>
               <div className="compact-score-grid">
                 <div>
-                  <span>{state.game.AwayTeamID}</span>
+                  <span>Opponent · {teamName("away")}</span>
                   <strong>{state.game.AwayScore}</strong>
                 </div>
                 <div>
-                  <span>{state.game.HomeTeamID}</span>
+                  <span>My Team · {teamName("home")}</span>
                   <strong>{state.game.HomeScore}</strong>
                 </div>
               </div>
@@ -631,11 +806,29 @@ function CapturePageContent() {
                       <div className="timeline-item" key={event.clientEventId}>
                         <strong>#{event.eventSeq} {event.eventType}</strong>
                         <div className="muted">
-                          {event.awayScore}-{event.homeScore} · Q{event.quarter} P{event.pointNumber} · Poss {event.possessionNumber}
+                          Opponent {event.awayScore} · My Team {event.homeScore} · Q{event.quarter} P{event.pointNumber} · Poss {event.possessionNumber}
                         </div>
                         <div className="timeline-meta">
-                          <div>Clock: {event.gameClockSecondsRemaining !== undefined ? formatClock(event.gameClockSecondsRemaining) : "--:--"}</div>
-                          <div>Team: {event.teamId ?? event.teamSide ?? "Unknown"}</div>
+                          {clockEnabled ? (
+                            <div className="event-clock-edit">
+                              <span>Clock</span>
+                              <input
+                                aria-label={`Edit clock for event ${event.eventSeq}`}
+                                value={eventClockInputs[event.clientEventId] ?? ""}
+                                onChange={(inputEvent) =>
+                                  setEventClockInputs((current) => ({
+                                    ...current,
+                                    [event.clientEventId]: inputEvent.target.value
+                                  }))
+                                }
+                                placeholder="MM:SS"
+                              />
+                              <button type="button" className="button small" onClick={() => editEventClock(event)}>
+                                Save
+                              </button>
+                            </div>
+                          ) : null}
+                          <div>Team: {event.teamSide ? shortTeamLabel(event.teamSide) : event.teamId ?? "Unknown"}</div>
                           {event.actorPlayerId ? <div>Player: {playerName(event.actorPlayerId)}</div> : null}
                           {event.targetPlayerId ? <div>Receiver: {playerName(event.targetPlayerId)}</div> : null}
                           {event.offensiveLinePlayerIds ? <div>Offense: {lineLabels(event.offensiveLinePlayerIds)}</div> : null}

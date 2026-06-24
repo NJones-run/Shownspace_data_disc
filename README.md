@@ -28,9 +28,10 @@ npm run dev
 ## Supabase Staging Setup
 
 1. Create a Supabase project.
-2. Run `supabase/migrations/0001_manual_staging.sql` in the Supabase SQL editor, or through the Supabase CLI.
-3. Copy `.env.example` to `.env.local` and fill in `SUPABASE_URL` plus `SUPABASE_SERVICE_ROLE_KEY`.
-4. Start the app with `npm run dev`, record events in Capture, then use the Sync button to write rows into `manual_games` and `manual_events`.
+2. Run `supabase/migrations/0001_manual_staging.sql` and `supabase/migrations/0002_capture_team_library.sql` in the Supabase SQL editor, or through the Supabase CLI. These create app-owned tables in the `data_disc` schema.
+3. Copy `.env.example` to `.env.local` and fill in `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SUPABASE_URL`, and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+4. In Supabase API settings, expose the `data_disc` schema if your project does not expose it already.
+5. Start the app with `npm run dev`, record events in Capture, then use the Sync button to write rows into `data_disc.manual_games` and `data_disc.manual_events`.
 
 ## Render Deployment
 
@@ -49,6 +50,8 @@ Add these environment variables in Render:
 NEXT_PUBLIC_APP_NAME=Frisbee Live Capture
 SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
 ```
 
 ## Project Shape

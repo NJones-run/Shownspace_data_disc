@@ -6,7 +6,7 @@ The scorer app captures raw manual events. It does not write directly to canonic
 
 ## Staging Tables
 
-### `manual_games`
+### `data_disc.manual_games`
 
 One row per capture session.
 
@@ -14,11 +14,15 @@ One row per capture session.
 - `GameID`
 - `device_id`
 - `scorer_name`
+- `tracked_team_id`
+- `opponent_name`
+- `game_date`
+- `tournament_name`
 - `sync_status`
 - `created_at`
 - `updated_at`
 
-### `manual_events`
+### `data_disc.manual_events`
 
 One row per scorer-entered event.
 
@@ -46,14 +50,14 @@ One row per scorer-entered event.
 - `created_at`
 - `updated_at`
 
-### `manual_event_audit`
+### `data_disc.manual_event_audit`
 
 Immutable audit trail for edits, deletes, sync attempts, and reviewer actions.
 
 ## Supabase Migration
 
-The staging schema lives in `supabase/migrations/0001_manual_staging.sql`. The app writes through the Next.js API route with `SUPABASE_SERVICE_ROLE_KEY`; the browser never receives the service role key.
+The staging tables live in the `data_disc` schema and are defined in `supabase/migrations/0001_manual_staging.sql`. The app writes through the Next.js API route with `SUPABASE_SERVICE_ROLE_KEY`; the browser never receives the service role key.
 
 ## Promotion Rule
 
-Promotion transforms reviewed `manual_events` into canonical event rows compatible with the existing backend pipeline. Promotion must validate uniqueness before writing canonical tables.
+Promotion transforms reviewed `data_disc.manual_events` into canonical event rows compatible with the existing backend pipeline. Promotion must validate uniqueness before writing canonical tables.

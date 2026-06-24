@@ -2,7 +2,7 @@ import type { ManualEvent } from "./types";
 
 export interface FieldTracePoint {
   eventSeq: number;
-  eventType: "throw" | "catch";
+  eventType: "throw" | "catch" | "tipped_self_catch";
   x: number;
   y: number;
 }
@@ -20,8 +20,10 @@ export function getCurrentPossessionTrace(events: ManualEvent[]): FieldTracePoin
   return events
     .slice(latestBoundaryIndex + 1)
     .filter(
-      (event): event is ManualEvent & { eventType: "throw" | "catch"; fieldX: number; fieldY: number } =>
-        (event.eventType === "throw" || event.eventType === "catch") &&
+      (
+        event
+      ): event is ManualEvent & { eventType: "throw" | "catch" | "tipped_self_catch"; fieldX: number; fieldY: number } =>
+        (event.eventType === "throw" || event.eventType === "catch" || event.eventType === "tipped_self_catch") &&
         event.fieldX !== undefined &&
         event.fieldY !== undefined
     )

@@ -1,12 +1,13 @@
 import { listQueuedEvents, updateEventSyncStatus } from "@/lib/db/indexed-db";
-import type { ManualEvent } from "@/lib/event-model/types";
+import type { CaptureSession, ManualEvent } from "@/lib/event-model/types";
 
 export interface SyncResult {
   acceptedClientEventIds: string[];
   rejected: Array<{ clientEventId: string; reason: string }>;
 }
 
-export async function pushQueuedEvents(sessionId: string, gameId: string): Promise<SyncResult> {
+export async function pushQueuedEvents(session: CaptureSession): Promise<SyncResult> {
+  const { sessionId, gameId } = session;
   const events = (await listQueuedEvents()).filter((event) => event.sessionId === sessionId);
   if (!events.length) {
     return { acceptedClientEventIds: [], rejected: [] };
@@ -15,7 +16,17 @@ export async function pushQueuedEvents(sessionId: string, gameId: string): Promi
   const response = await fetch("/api/manual-events/batch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, gameId, events })
+    body: JSON.stringify({
+      sessionId,
+      gameId,
+      deviceId: session.deviceId,
+      scorerName: session.scorerName,
+      trackedTeamId: session.trackedTeamId,
+      opponentName: session.opponentName,
+      gameDate: session.gameDate,
+      tournamentName: session.tournamentName,
+      events
+    })
   });
 
   if (!response.ok) {

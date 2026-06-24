@@ -53,6 +53,10 @@ export async function persistManualEventBatch(batch: ManualEventBatchInput) {
       GameID: batch.gameId,
       device_id: batch.deviceId ?? null,
       scorer_name: batch.scorerName ?? null,
+      tracked_team_id: batch.trackedTeamId ?? null,
+      opponent_name: batch.opponentName ?? null,
+      game_date: batch.gameDate ?? null,
+      tournament_name: batch.tournamentName ?? null,
       sync_status: "accepted_for_review",
       updated_at: now
     },

@@ -25,6 +25,7 @@ function initialLike(state: CaptureState): CaptureState {
     events: [],
     game: { ...state.game, HomeScore: 0, AwayScore: 0 },
     possessionTeamSide: "home",
+    gameClockSecondsRemaining: state.rulesMode === "ufa" ? 15 * 60 : undefined,
     quarter: 1,
     pointNumber: 1,
     possessionNumber: 1
@@ -32,6 +33,10 @@ function initialLike(state: CaptureState): CaptureState {
 }
 
 export function captureReducer(state: CaptureState, action: CaptureAction): CaptureState {
+  if (action.type === "replace_state") {
+    return action.state;
+  }
+
   if (action.type === "undo_last") {
     const events = state.events.slice(0, -1);
     const rebuilt = events.reduce(
@@ -71,6 +76,40 @@ export function captureReducer(state: CaptureState, action: CaptureAction): Capt
     };
   }
 
+  if (action.type === "set_rules_mode") {
+    return {
+      ...state,
+      rulesMode: action.rulesMode,
+      gameClockSecondsRemaining: action.rulesMode === "ufa" ? state.gameClockSecondsRemaining : undefined,
+      session: { ...state.session, updatedAt: new Date().toISOString() }
+    };
+  }
+
+  if (action.type === "set_game_clock") {
+    return {
+      ...state,
+      gameClockSecondsRemaining:
+        action.secondsRemaining === undefined ? undefined : Math.max(0, action.secondsRemaining),
+      session: { ...state.session, updatedAt: new Date().toISOString() }
+    };
+  }
+
+  if (action.type === "edit_event_clock") {
+    return {
+      ...state,
+      events: state.events.map((event) =>
+        event.clientEventId === action.clientEventId
+          ? {
+              ...event,
+              gameClockSecondsRemaining: action.secondsRemaining,
+              syncStatus: event.syncStatus === "synced" ? "local" : event.syncStatus
+            }
+          : event
+      ),
+      session: { ...state.session, updatedAt: new Date().toISOString() }
+    };
+  }
+
   const now = new Date().toISOString();
   const teamSide = action.teamSide ?? state.possessionTeamSide;
   const scores = applyScore(action.eventType, teamSide, state.game.HomeScore, state.game.AwayScore);
@@ -88,7 +127,7 @@ export function captureReducer(state: CaptureState, action: CaptureAction): Capt
     defensiveLinePlayerIds: action.defensiveLinePlayerIds,
     fieldX: action.fieldX,
     fieldY: action.fieldY,
-    gameClockSecondsRemaining: action.gameClockSecondsRemaining,
+    gameClockSecondsRemaining: state.rulesMode === "ufa" ? action.gameClockSecondsRemaining : undefined,
     quarter: state.quarter,
     pointNumber: state.pointNumber,
     possessionNumber: state.possessionNumber,
@@ -99,24 +138,18 @@ export function captureReducer(state: CaptureState, action: CaptureAction): Capt
     syncStatus: "local"
   };
   // If this is a possession boundary, apply special handling
-  const isPossessionStart = action.eventType === "possession_start";
+  const isPossessionStart = action.eventType === "possession_start" || action.eventType === "pull";
   const isPossessionEnd = action.eventType === "possession_end";
   const isBlock = action.eventType === "block";
   const isTurnover = action.eventType === "turnover";
 
-  // Infer the thrower for a throw event when actorPlayerId was not provided
-  if (action.eventType === "throw" && !event.actorPlayerId) {
-    const lastCatch = [...state.events].reverse().find((e) => e.eventType === "catch" && e.actorPlayerId);
-    if (lastCatch) {
-      event.actorPlayerId = lastCatch.actorPlayerId;
-    }
-  }
-
   const pointEnded = action.eventType === "goal";
+  const possessionClockShouldClear = state.rulesMode === "ufa" && (pointEnded || isPossessionEnd || isBlock || isTurnover);
 
   return {
     ...state,
     game: { ...state.game, HomeScore: scores.homeScore, AwayScore: scores.awayScore },
+    gameClockSecondsRemaining: possessionClockShouldClear ? undefined : state.gameClockSecondsRemaining,
     session: { ...state.session, updatedAt: now },
     events: [...state.events, event],
     possessionTeamSide: pointEnded

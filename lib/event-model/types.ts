@@ -1,4 +1,5 @@
 export type TeamSide = "home" | "away";
+export type RulesMode = "ufa" | "club";
 
 export type ManualEventType =
   | "point_start"
@@ -7,6 +8,7 @@ export type ManualEventType =
   | "pull"
   | "throw"
   | "catch"
+  | "tipped_self_catch"
   | "drop"
   | "block"
   | "turnover"
@@ -26,6 +28,10 @@ export interface CaptureGame {
   AwayScore: number;
   Status: string;
   Year: number;
+  trackedTeamId?: string;
+  opponentName?: string;
+  gameDate?: string;
+  tournamentName?: string;
 }
 
 export interface CapturePlayer {
@@ -42,6 +48,10 @@ export interface CaptureSession {
   gameId: string;
   deviceId: string;
   scorerName?: string;
+  trackedTeamId?: string;
+  opponentName?: string;
+  gameDate?: string;
+  tournamentName?: string;
   createdAt: string;
   updatedAt: string;
   syncStatus: SyncStatus;
@@ -78,12 +88,15 @@ export interface CaptureState {
   players: CapturePlayer[];
   events: ManualEvent[];
   possessionTeamSide: TeamSide;
+  rulesMode: RulesMode;
+  gameClockSecondsRemaining?: number;
   quarter: number;
   pointNumber: number;
   possessionNumber: number;
 }
 
 export type CaptureAction =
+  | { type: "replace_state"; state: CaptureState }
   | {
       type: "record_event";
       eventType: ManualEventType;
@@ -99,6 +112,9 @@ export type CaptureAction =
     }
   | { type: "undo_last" }
   | { type: "set_quarter"; quarter: number }
+  | { type: "set_rules_mode"; rulesMode: RulesMode }
+  | { type: "set_game_clock"; secondsRemaining?: number }
+  | { type: "edit_event_clock"; clientEventId: string; secondsRemaining?: number }
   | { type: "mark_queued"; clientEventIds: string[] }
   | { type: "mark_synced"; clientEventIds: string[] }
   | { type: "mark_error"; clientEventIds: string[] };

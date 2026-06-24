@@ -12,7 +12,7 @@ Existing DB games/teams/players
   -> IndexedDB cache
   -> tablet event capture
   -> sync queue
-  -> manual staging tables
+  -> data_disc manual staging tables
   -> review
   -> canonical pipeline promotion
 ```
@@ -20,6 +20,6 @@ Existing DB games/teams/players
 ## First Real Integration Points
 
 - Replace demo game-package data with Supabase reads.
-- Persist `manual_events` batches to staging tables.
+- Persist `manual_events` batches to `data_disc` staging tables.
 - Add reviewer auth before approving sessions.
 - Build a promotion job that converts reviewed manual events into canonical event rows.

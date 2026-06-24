@@ -134,6 +134,10 @@ export function createCaptureState(game: CaptureGame, players: CapturePlayer[] =
       gameId: game.GameID,
       deviceId: "local-device",
       scorerName: "Demo Scorer",
+      trackedTeamId: game.trackedTeamId,
+      opponentName: game.opponentName,
+      gameDate: game.gameDate,
+      tournamentName: game.tournamentName,
       createdAt: now,
       updatedAt: now,
       syncStatus: "local"
@@ -141,6 +145,8 @@ export function createCaptureState(game: CaptureGame, players: CapturePlayer[] =
     players,
     events: [],
     possessionTeamSide: "home",
+    rulesMode: "ufa",
+    gameClockSecondsRemaining: undefined,
     quarter: 1,
     pointNumber: 1,
     possessionNumber: 1
@@ -154,6 +160,36 @@ function slugifyTeamName(value: string, fallback: string) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return slug || fallback;
+}
+
+export function createTrackedTeamGame({
+  trackedTeamId,
+  trackedTeamName,
+  opponentName,
+  gameDate,
+  tournamentName
+}: {
+  trackedTeamId: string;
+  trackedTeamName: string;
+  opponentName: string;
+  gameDate: string;
+  tournamentName?: string;
+}): CaptureGame {
+  const opponent = opponentName.trim() || "Opponent";
+  const date = gameDate.trim() || new Date().toISOString().slice(0, 10);
+  return {
+    GameID: `tracked-${slugifyTeamName(trackedTeamName, "team")}-vs-${slugifyTeamName(opponent, "opponent")}-${date}`,
+    HomeTeamID: trackedTeamId,
+    AwayTeamID: opponent,
+    HomeScore: 0,
+    AwayScore: 0,
+    Status: "Shared",
+    Year: Number(date.slice(0, 4)) || new Date().getFullYear(),
+    trackedTeamId,
+    opponentName: opponent,
+    gameDate: date,
+    tournamentName: tournamentName?.trim() || undefined
+  };
 }
 
 export function createCustomGame(awayTeam: string, homeTeam: string): CaptureGame {
