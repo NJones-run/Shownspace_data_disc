@@ -174,6 +174,7 @@ export async function listPlayers(teamId: string, userId: string | undefined, sc
     .from("capture_team_players")
     .select("id,team_id,player_id,first_name,last_name,jersey_number,active")
     .eq("team_id", teamId)
+    .eq("active", true)
     .order("last_name");
   if (error) throw new Error(error.message);
   return data ?? [];
