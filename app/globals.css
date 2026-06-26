@@ -369,15 +369,13 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(2, minmax(280px, 1fr));
   gap: 16px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .game-card,
 .custom-game-form {
-  min-height: 320px;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
   gap: 18px;
 }
 
