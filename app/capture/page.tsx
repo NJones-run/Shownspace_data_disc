@@ -4,6 +4,7 @@ import { Suspense, useEffect, useMemo, useReducer, useRef, useState, type MouseE
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { saveEvents, updateEventSyncStatus } from "@/lib/db/indexed-db";
+import { EMPTY_CLOCK_INPUT, formatClock, maskClockInput, parseClock } from "@/lib/event-model/clock";
 import { getCurrentPossessionTrace } from "@/lib/event-model/field-trace";
 import { getRecordEventBlockReason } from "@/lib/event-model/recording-rules";
 import { captureReducer } from "@/lib/event-model/reducer";
@@ -16,6 +17,7 @@ import { scorerTokenHeader } from "@/lib/team-library/client-access";
 
 const CLOCK_START_SECONDS = 15 * 60;
 const FIELD_ASPECT_RATIO = 2;
+type ThrowSelectionStep = "thrower" | "receiver";
 
 const eventButtons: Array<{ label: string; eventType: ManualEventType; teamSide?: TeamSide }> = [
   { label: "Throw", eventType: "throw" },
@@ -34,30 +36,6 @@ interface RecordEventOptions {
   actorPlayerId?: string;
   targetPlayerId?: string;
   fieldCoordinate?: { x: number; y: number } | null;
-}
-
-function formatClock(seconds: number) {
-  const safeSeconds = Math.max(0, seconds);
-  const minutes = Math.floor(safeSeconds / 60);
-  const remainingSeconds = safeSeconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
-}
-
-function parseClock(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  const parts = trimmed.split(":");
-  if (parts.length === 1) {
-    const seconds = Number(parts[0]);
-    return Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds) : undefined;
-  }
-  if (parts.length !== 2) return undefined;
-  const minutes = Number(parts[0]);
-  const seconds = Number(parts[1]);
-  if (!Number.isInteger(minutes) || !Number.isInteger(seconds) || minutes < 0 || seconds < 0 || seconds > 59) {
-    return undefined;
-  }
-  return minutes * 60 + seconds;
 }
 
 function createInitialState(gameId: string | null, awayTeam: string | null, homeTeam: string | null): CaptureState {
@@ -96,6 +74,7 @@ function CapturePageContent() {
   const [selectedReceiver, setSelectedReceiver] = useState<string>("");
   const [selectedFieldCoordinate, setSelectedFieldCoordinate] = useState<{ x: number; y: number } | null>(null);
   const [selectedEvent, setSelectedEvent] = useState(eventButtons[0]);
+  const [throwSelectionStep, setThrowSelectionStep] = useState<ThrowSelectionStep>("thrower");
   const [autoRecordEnabled, setAutoRecordEnabled] = useState(false);
   const [clockInput, setClockInput] = useState("");
   const [eventClockInputs, setEventClockInputs] = useState<Record<string, string>>({});
@@ -149,6 +128,7 @@ function CapturePageContent() {
       setRecordingTeam("home");
       setSelectedActor("");
       setSelectedReceiver("");
+      setThrowSelectionStep("thrower");
       setSelectedFieldCoordinate(null);
     };
 
@@ -160,7 +140,7 @@ function CapturePageContent() {
       setClockInput("");
       return;
     }
-    setClockInput(possessionClock !== undefined ? formatClock(possessionClock) : "");
+    setClockInput(possessionClock !== undefined ? formatClock(possessionClock) : EMPTY_CLOCK_INPUT);
   }, [clockEnabled, possessionClock]);
 
   useEffect(() => {
@@ -169,7 +149,7 @@ function CapturePageContent() {
       state.events.forEach((event) => {
         if (!(event.clientEventId in next)) {
           next[event.clientEventId] =
-            event.gameClockSecondsRemaining !== undefined ? formatClock(event.gameClockSecondsRemaining) : "";
+            event.gameClockSecondsRemaining !== undefined ? formatClock(event.gameClockSecondsRemaining) : EMPTY_CLOCK_INPUT;
         }
       });
       return next;
@@ -224,22 +204,26 @@ function CapturePageContent() {
   const lineLabels = (playerIds?: string[]) =>
     playerIds?.map(playerName).filter(Boolean).join(", ") ?? "";
 
-  const teamLabel = (side: TeamSide) =>
-    side === "home" ? `My Team · ${state.game.HomeTeamID}` : `Opponent · ${state.game.opponentName ?? state.game.AwayTeamID}`;
-  const shortTeamLabel = (side: TeamSide) => (side === "home" ? "My Team" : "Opponent");
-  const teamName = (side: TeamSide) => (side === "home" ? state.game.HomeTeamID : state.game.opponentName ?? state.game.AwayTeamID);
+  const displayTeamName = (side: TeamSide) =>
+    side === "home"
+      ? state.game.homeTeamName ?? "My Team"
+      : state.game.awayTeamName ?? state.game.opponentName ?? "Opponent";
+  const teamLabel = (side: TeamSide) => `${side === "home" ? "My Team" : "Opponent"} · ${displayTeamName(side)}`;
+  const shortTeamLabel = (side: TeamSide) => `${side === "home" ? "My Team" : "Opponent"} · ${displayTeamName(side)}`;
 
   const changeRecordingTeam = (teamSide: TeamSide) => {
     setRecordingTeam(teamSide);
     setActiveLineId("line-1");
     setSelectedActor("");
     setSelectedReceiver("");
+    setThrowSelectionStep("thrower");
   };
 
   const chooseActivePreset = (presetId: string) => {
     setActiveLineId(presetId);
     setSelectedActor("");
     setSelectedReceiver("");
+    setThrowSelectionStep("thrower");
   };
 
   const togglePresetSelection = (presetId: string, playerId: string) => {
@@ -252,6 +236,7 @@ function CapturePageContent() {
     if (presetId === activeLineId) {
       setSelectedActor("");
       setSelectedReceiver("");
+      setThrowSelectionStep("thrower");
     }
   };
 
@@ -270,18 +255,35 @@ function CapturePageContent() {
     return Boolean(actorPlayerId);
   };
 
-  const selectPlayer = (playerId: string, role: "actor" | "receiver") => {
+  const chooseEvent = (button: typeof eventButtons[number]) => {
+    setSelectedEvent(button);
+    if (button.eventType === "throw") {
+      setThrowSelectionStep("thrower");
+    }
+  };
+
+  const selectPlayer = (playerId: string) => {
     let nextActor = selectedActor;
     let nextReceiver = selectedReceiver;
 
-    if (role === "actor") {
+    if (selectedEvent.eventType === "throw" && throwSelectionStep === "receiver") {
+      if (playerId === selectedActor) {
+        nextActor = "";
+        nextReceiver = "";
+        setThrowSelectionStep("thrower");
+      } else {
+        nextReceiver = selectedReceiver === playerId ? "" : playerId;
+      }
+      setSelectedActor(nextActor);
+      setSelectedReceiver(nextReceiver);
+    } else {
       nextActor = selectedActor === playerId ? "" : playerId;
       nextReceiver = selectedReceiver === playerId ? "" : selectedReceiver;
       setSelectedActor(nextActor);
       setSelectedReceiver(nextReceiver);
-    } else {
-      nextReceiver = selectedReceiver === playerId ? "" : playerId;
-      setSelectedReceiver(nextReceiver);
+      if (selectedEvent.eventType === "throw") {
+        setThrowSelectionStep(nextActor ? "receiver" : "thrower");
+      }
     }
 
     if (
@@ -350,9 +352,11 @@ function CapturePageContent() {
     if (eventType === "throw" && targetForDispatch) {
       setSelectedActor(targetForDispatch);
       setSelectedReceiver("");
+      setThrowSelectionStep("receiver");
     } else if (possessionBoundary) {
       setSelectedFieldCoordinate(null);
       setSelectedReceiver("");
+      setThrowSelectionStep("thrower");
     }
   };
 
@@ -449,25 +453,47 @@ function CapturePageContent() {
     void syncEvents();
   }, [syncAfterGoal, state.events]);
 
-  const renderPicker = (label: string, selectedId: string, role: "actor" | "receiver") => (
-    <div className="field">
-      <label>{label}</label>
+  const effectiveThrowStep: ThrowSelectionStep =
+    selectedEvent.eventType === "throw" && selectedActor && throwSelectionStep === "receiver" ? "receiver" : "thrower";
+  const pickerRole = selectedEvent.eventType === "throw" && effectiveThrowStep === "receiver" ? "receiver" : "actor";
+  const playerActionLabel =
+    selectedEvent.eventType === "throw"
+      ? effectiveThrowStep === "receiver"
+        ? "Action: Select Receiver"
+        : "Action: Select Thrower"
+      : selectedEvent.eventType === "tipped_self_catch"
+      ? "Action: Select Recovering Player"
+      : "Action: Select Player";
+  const selectedThrowerLabel = selectedActor ? playerName(selectedActor) : "None";
+  const selectedReceiverLabel = selectedReceiver ? playerName(selectedReceiver) : "None";
+
+  const renderPlayerActionPicker = () => (
+    <div className="player-action-picker">
+      <div>
+        <h3>{playerActionLabel}</h3>
+        {selectedEvent.eventType === "throw" ? (
+          <p className="muted compact-copy">
+            Thrower: {selectedThrowerLabel} · Receiver: {selectedReceiverLabel}
+          </p>
+        ) : null}
+      </div>
       {activePlayers.length === 0 ? (
         <p className="muted compact-copy">Select active line players to enable player tagging.</p>
       ) : (
-        <div className="active-player-grid">
+        <div className="active-player-grid player-action-grid">
           {activePlayers.map((player) => {
-            const unavailableReceiver = role === "receiver" && player.PlayerID === selectedActor;
+            const isCurrentThrower = selectedEvent.eventType === "throw" && pickerRole === "receiver" && player.PlayerID === selectedActor;
+            const selectedId = pickerRole === "receiver" ? selectedReceiver : selectedActor;
             return (
               <button
-                key={`${role}-${player.PlayerID}`}
+                key={`player-action-${player.PlayerID}`}
                 type="button"
-                className={`player-box compact ${selectedId === player.PlayerID ? "selected" : ""}`}
-                disabled={unavailableReceiver}
-                onClick={() => selectPlayer(player.PlayerID, role)}
+                className={`player-box compact player-action-tile ${selectedId === player.PlayerID || isCurrentThrower ? "selected" : ""}`}
+                onClick={() => selectPlayer(player.PlayerID)}
               >
                 <strong>{player.JerseyNumber ? `#${player.JerseyNumber}` : "--"}</strong>
                 <span>{player.FirstName} {player.LastName}</span>
+                {isCurrentThrower ? <small>Thrower · tap to clear</small> : null}
               </button>
             );
           })}
@@ -513,14 +539,14 @@ function CapturePageContent() {
                     className={recordingTeam === "home" ? "selected" : ""}
                     onClick={() => changeRecordingTeam("home")}
                   >
-                    My Team · {state.game.HomeTeamID}
+                    My Team · {displayTeamName("home")}
                   </button>
                   <button
                     type="button"
                     className={recordingTeam === "away" ? "selected" : ""}
                     onClick={() => changeRecordingTeam("away")}
                   >
-                    Opponent · {state.game.opponentName ?? state.game.AwayTeamID}
+                    Opponent · {displayTeamName("away")}
                   </button>
                 </div>
               </div>
@@ -607,7 +633,7 @@ function CapturePageContent() {
                           ? "selected"
                           : ""
                       }
-                      onClick={() => setSelectedEvent(button)}
+                      onClick={() => chooseEvent(button)}
                     >
                       {button.label}
                     </button>
@@ -667,18 +693,7 @@ function CapturePageContent() {
             <section className="panel capture-section player-action-panel">
               <h2>Player Selection</h2>
 
-              <div className={selectedEvent.eventType === "throw" ? "player-picker-grid two" : "player-picker-grid"}>
-                {renderPicker(
-                  selectedEvent.eventType === "throw"
-                    ? "Thrower"
-                    : selectedEvent.eventType === "tipped_self_catch"
-                    ? "Recovered by"
-                    : "Player",
-                  selectedActor,
-                  "actor"
-                )}
-                {selectedEvent.eventType === "throw" ? renderPicker("Receiver", selectedReceiver, "receiver") : null}
-              </div>
+              {renderPlayerActionPicker()}
 
               <button className="button primary record-button" type="button" disabled={recordDisabled} onClick={() => recordEvent()}>
                 Record {selectedEvent.label}
@@ -710,8 +725,10 @@ function CapturePageContent() {
                     <input
                       aria-label="Set possession clock"
                       value={clockInput}
-                      onChange={(event) => setClockInput(event.target.value)}
-                      placeholder="MM:SS"
+                      onChange={(event) => setClockInput(maskClockInput(event.target.value))}
+                      onFocus={() => setClockInput((current) => current || EMPTY_CLOCK_INPUT)}
+                      inputMode="numeric"
+                      placeholder={EMPTY_CLOCK_INPUT}
                     />
                     <button type="button" className="button" onClick={updateClockFromInput}>
                       Set Clock
@@ -749,11 +766,11 @@ function CapturePageContent() {
               <span className="muted">Score</span>
               <div className="compact-score-grid">
                 <div>
-                  <span>Opponent · {teamName("away")}</span>
+                  <span>Opponent · {displayTeamName("away")}</span>
                   <strong>{state.game.AwayScore}</strong>
                 </div>
                 <div>
-                  <span>My Team · {teamName("home")}</span>
+                  <span>My Team · {displayTeamName("home")}</span>
                   <strong>{state.game.HomeScore}</strong>
                 </div>
               </div>
@@ -818,17 +835,24 @@ function CapturePageContent() {
                                 onChange={(inputEvent) =>
                                   setEventClockInputs((current) => ({
                                     ...current,
-                                    [event.clientEventId]: inputEvent.target.value
+                                    [event.clientEventId]: maskClockInput(inputEvent.target.value)
                                   }))
                                 }
-                                placeholder="MM:SS"
+                                onFocus={() =>
+                                  setEventClockInputs((current) => ({
+                                    ...current,
+                                    [event.clientEventId]: current[event.clientEventId] || EMPTY_CLOCK_INPUT
+                                  }))
+                                }
+                                inputMode="numeric"
+                                placeholder={EMPTY_CLOCK_INPUT}
                               />
                               <button type="button" className="button small" onClick={() => editEventClock(event)}>
                                 Save
                               </button>
                             </div>
                           ) : null}
-                          <div>Team: {event.teamSide ? shortTeamLabel(event.teamSide) : event.teamId ?? "Unknown"}</div>
+                          <div>Team: {event.teamSide ? shortTeamLabel(event.teamSide) : "Unknown"}</div>
                           {event.actorPlayerId ? <div>Player: {playerName(event.actorPlayerId)}</div> : null}
                           {event.targetPlayerId ? <div>Receiver: {playerName(event.targetPlayerId)}</div> : null}
                           {event.offensiveLinePlayerIds ? <div>Offense: {lineLabels(event.offensiveLinePlayerIds)}</div> : null}

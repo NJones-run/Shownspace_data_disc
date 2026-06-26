@@ -258,6 +258,8 @@ describe("captureReducer", () => {
     expect(state.game.GameID).toBe("2026-demo-NY-SLC");
     expect(state.game.HomeTeamID).toBe("shred");
     expect(state.game.AwayTeamID).toBe("empire");
+    expect(state.game.homeTeamName).toBe("Salt Lake Shred");
+    expect(state.game.awayTeamName).toBe("NY Empire");
     expect(state.players).toHaveLength(demoPlayers.length);
     expect(state.players.some((player) => player.PlayerID === "empire-alex-atkins")).toBe(true);
     expect(state.players.some((player) => player.PlayerID === "shred-jordan-kerr")).toBe(true);
@@ -278,6 +280,8 @@ describe("captureReducer", () => {
     expect(state.game.GameID).toBe("custom-visitors-at-hosts");
     expect(state.game.AwayTeamID).toBe("Visitors");
     expect(state.game.HomeTeamID).toBe("Hosts");
+    expect(state.game.awayTeamName).toBe("Visitors");
+    expect(state.game.homeTeamName).toBe("Hosts");
     expect(state.players).toEqual([]);
     expect(state.events).toEqual([]);
   });
@@ -293,6 +297,8 @@ describe("captureReducer", () => {
 
     expect(game.HomeTeamID).toBe("team-1");
     expect(game.AwayTeamID).toBe("Rival Club");
+    expect(game.homeTeamName).toBe("Local Club");
+    expect(game.awayTeamName).toBe("Rival Club");
     expect(game.trackedTeamId).toBe("team-1");
     expect(game.opponentName).toBe("Rival Club");
     expect(game.gameDate).toBe("2026-06-23");

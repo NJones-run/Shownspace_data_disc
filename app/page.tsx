@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { demoGame, demoPlayers } from "@/lib/event-model/fixtures";
@@ -22,6 +22,30 @@ interface TeamPlayerRow {
   last_name: string;
   jersey_number?: string | null;
   active: boolean;
+}
+
+interface StatsGameOption {
+  sessionId: string;
+  gameId: string;
+  label: string;
+}
+
+interface PlayerStatsRow {
+  playerId: string;
+  playerName: string;
+  jerseyNumber?: string;
+  games: number;
+  totalEvents: number;
+  throws: number;
+  completions: number;
+  receptions: number;
+  goals: number;
+  drops: number;
+  blocks: number;
+  turnovers: number;
+  pulls: number;
+  tippedSelfCatches: number;
+  penalties: number;
 }
 
 async function authHeader() {
@@ -55,13 +79,13 @@ function localDateInputValue(date = new Date()) {
 
 export default function HomePage() {
   const router = useRouter();
+  const [homeTab, setHomeTab] = useState<"setup" | "stats">("setup");
   const [authMode, setAuthMode] = useState<"signIn" | "create">("signIn");
   const [managerEmail, setManagerEmail] = useState("");
   const [managerPassword, setManagerPassword] = useState("");
   const [managerPasswordConfirm, setManagerPasswordConfirm] = useState("");
   const [sessionEmail, setSessionEmail] = useState("");
   const [teams, setTeams] = useState<TeamSummary[]>([]);
-  const [query, setQuery] = useState("");
   const [selectedTeamId, setSelectedTeamId] = useState("");
   const [opponentName, setOpponentName] = useState("");
   const [gameDate, setGameDate] = useState(() => localDateInputValue());
@@ -74,19 +98,21 @@ export default function HomePage() {
   const [jerseyNumber, setJerseyNumber] = useState("");
   const [inviteLabel, setInviteLabel] = useState("");
   const [latestInviteUrl, setLatestInviteUrl] = useState("");
+  const [statsTeamId, setStatsTeamId] = useState("");
+  const [statsGameSessionId, setStatsGameSessionId] = useState("");
+  const [statsGames, setStatsGames] = useState<StatsGameOption[]>([]);
+  const [playerStats, setPlayerStats] = useState<PlayerStatsRow[]>([]);
+  const [statsLoading, setStatsLoading] = useState(false);
   const [message, setMessage] = useState("Ready");
   const [authBusy, setAuthBusy] = useState(false);
-
-  const filteredTeams = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    return needle ? teams.filter((team) => team.name.toLowerCase().includes(needle)) : teams;
-  }, [query, teams]);
 
   const activeTeam = teams.find((team) => team.id === activeTeamId);
   const refreshTeams = async () => {
     const body = await apiFetch("/api/teams");
     setTeams(body.teams ?? []);
     if (!activeTeamId && body.teams?.[0]) setActiveTeamId(body.teams[0].id);
+    if (!selectedTeamId && body.teams?.[0]) setSelectedTeamId(body.teams[0].id);
+    if (!statsTeamId && body.teams?.[0]) setStatsTeamId(body.teams[0].id);
   };
 
   const refreshPlayers = async (teamId: string) => {
@@ -114,6 +140,27 @@ export default function HomePage() {
   useEffect(() => {
     void refreshPlayers(activeTeamId).catch((error) => setMessage(error instanceof Error ? error.message : "Unable to load roster"));
   }, [activeTeamId]);
+
+  useEffect(() => {
+    if (homeTab !== "stats" || !statsTeamId) return;
+    const loadStats = async () => {
+      setStatsLoading(true);
+      try {
+        const params = new URLSearchParams();
+        if (statsGameSessionId) params.set("sessionId", statsGameSessionId);
+        const body = await apiFetch(`/api/teams/${statsTeamId}/stats${params.toString() ? `?${params.toString()}` : ""}`);
+        setStatsGames(body.games ?? []);
+        setPlayerStats(body.stats ?? []);
+      } catch (error) {
+        setPlayerStats([]);
+        setStatsGames([]);
+        setMessage(error instanceof Error ? error.message : "Unable to load player stats.");
+      } finally {
+        setStatsLoading(false);
+      }
+    };
+    void loadStats();
+  }, [homeTab, statsTeamId, statsGameSessionId]);
 
   const signIn = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -284,8 +331,19 @@ export default function HomePage() {
           <span className="status-pill neutral">{sessionEmail ? `Manager: ${sessionEmail}` : "Score-only or signed out"}</span>
         </div>
 
-        <div className="game-selection-grid">
-          <section className="panel custom-game-form">
+        <div className="segmented-control home-tabs" aria-label="Home page sections">
+          <button type="button" className={homeTab === "setup" ? "selected" : ""} onClick={() => setHomeTab("setup")}>
+            Capture Setup
+          </button>
+          <button type="button" className={homeTab === "stats" ? "selected" : ""} onClick={() => setHomeTab("stats")}>
+            Player Stats
+          </button>
+        </div>
+
+        {homeTab === "setup" ? (
+          <>
+        <div className="team-library-full-row">
+          <section className="panel custom-game-form team-library-auth-card">
             <div>
               <span className="status-pill neutral">Manager</span>
               <h2>{authMode === "create" ? "Create Account" : "Sign In"}</h2>
@@ -390,21 +448,148 @@ export default function HomePage() {
           </section>
         </div>
 
-        <div className="game-selection-grid">
+        <div className="team-library-management-grid">
+          <section className="panel custom-game-form team-library-management-card">
+            <div>
+              <span className="status-pill neutral">Manager Teams</span>
+              <h2>Team Setup</h2>
+            </div>
+            <form onSubmit={createTeam}>
+              <div className="field">
+                <label htmlFor="new-team">New Team</label>
+                <input id="new-team" value={newTeamName} onChange={(event) => setNewTeamName(event.target.value)} placeholder="Team name" />
+              </div>
+              <button className="button primary full-width" type="submit">
+                Create Team
+              </button>
+            </form>
+            <div className="field">
+              <label htmlFor="active-team">Roster Team</label>
+              <select id="active-team" value={activeTeamId} onChange={(event) => setActiveTeamId(event.target.value)}>
+                <option value="">Select team</option>
+                {teams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name} · {team.accessRole}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="team-library-divider" />
+
+            <div>
+              <div className="score-link-heading">
+                <div>
+                  <span className="status-pill neutral">Invite</span>
+                  <h2>Score-Only Link</h2>
+                </div>
+                <button
+                  aria-label="What score-only links do"
+                  className="info-icon"
+                  data-tooltip="Score-only links let another person use this roster to record games without signing in or editing players."
+                  title="Score-only links let another person use this roster to record games without signing in or editing players."
+                  type="button"
+                >
+                  i
+                </button>
+              </div>
+              {activeTeam ? (
+                activeTeam.accessRole === "manager" ? (
+                  <>
+                    <div className="field">
+                      <label htmlFor="invite-label">Label</label>
+                      <input
+                        id="invite-label"
+                        value={inviteLabel}
+                        onChange={(event) => setInviteLabel(event.target.value)}
+                        placeholder="June scorer"
+                      />
+                    </div>
+                    <button className="button primary full-width" type="button" onClick={createInvite}>
+                      Create Invite
+                    </button>
+                    {latestInviteUrl ? (
+                      <div className="field">
+                        <label htmlFor="invite-url">Latest Invite URL</label>
+                        <input id="invite-url" value={latestInviteUrl} readOnly />
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="muted compact-copy">Score-only access can use this roster but cannot create invites.</p>
+                )
+              ) : (
+                <p className="muted compact-copy">Select a roster team to create or view score-only access.</p>
+              )}
+            </div>
+          </section>
+
+          <section className="panel custom-game-form team-library-management-card roster-card">
+            {activeTeam ? (
+              <>
+              <div>
+                <span className="status-pill">{activeTeam.accessRole}</span>
+                <h2>{activeTeam.name} Roster</h2>
+                <p className="muted compact-copy">{players.length} player{players.length === 1 ? "" : "s"} on this roster.</p>
+              </div>
+              {activeTeam.accessRole === "manager" ? (
+                <form onSubmit={addPlayer}>
+                  <div className="field horizontal-grid">
+                    <div>
+                      <label htmlFor="first-name">First</label>
+                      <input id="first-name" value={firstName} onChange={(event) => setFirstName(event.target.value)} />
+                    </div>
+                    <div>
+                      <label htmlFor="last-name">Last</label>
+                      <input id="last-name" value={lastName} onChange={(event) => setLastName(event.target.value)} />
+                    </div>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="jersey">Jersey</label>
+                    <input id="jersey" value={jerseyNumber} onChange={(event) => setJerseyNumber(event.target.value)} />
+                  </div>
+                  <button className="button primary full-width" type="submit">
+                    Add Player
+                  </button>
+                </form>
+              ) : null}
+              <div className="timeline roster-scroll">
+                {players.map((player) => (
+                  <div className="timeline-item" key={player.id}>
+                    <strong>
+                      {player.jersey_number ? `#${player.jersey_number} ` : ""}
+                      {player.first_name} {player.last_name}
+                    </strong>
+                    {activeTeam.accessRole === "manager" ? (
+                      <button className="button small" type="button" onClick={() => deactivatePlayer(player.id)}>
+                        Remove
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+              </>
+            ) : (
+              <div>
+                <span className="status-pill neutral">Roster</span>
+                <h2>Select a Team</h2>
+                <p className="muted compact-copy">Choose a roster team on the left to add players or review the shared roster.</p>
+              </div>
+            )}
+          </section>
+        </div>
+
+        <div className="team-library-full-row">
           <section className="panel custom-game-form">
             <div>
               <span className="status-pill">Shared</span>
               <h2>Start Capture</h2>
             </div>
             <div className="field">
-              <label htmlFor="team-search">Search Teams</label>
-              <input id="team-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Team name" />
-            </div>
-            <div className="field">
               <label htmlFor="tracked-team">My Team</label>
               <select id="tracked-team" value={selectedTeamId} onChange={(event) => setSelectedTeamId(event.target.value)}>
                 <option value="">Select team</option>
-                {filteredTeams.map((team) => (
+                {teams.map((team) => (
                   <option key={`tracked-${team.id}`} value={team.id}>
                     {team.name} ({team.playerCount ?? 0})
                   </option>
@@ -437,115 +622,9 @@ export default function HomePage() {
               Start Capture
             </button>
           </section>
-
-          <section className="panel custom-game-form">
-            <div>
-              <span className="status-pill neutral">Manager Teams</span>
-              <h2>Team Setup</h2>
-            </div>
-            <form onSubmit={createTeam}>
-              <div className="field">
-                <label htmlFor="new-team">New Team</label>
-                <input id="new-team" value={newTeamName} onChange={(event) => setNewTeamName(event.target.value)} placeholder="Team name" />
-              </div>
-              <button className="button primary full-width" type="submit">
-                Create Team
-              </button>
-            </form>
-            <div className="field">
-              <label htmlFor="active-team">Roster Team</label>
-              <select id="active-team" value={activeTeamId} onChange={(event) => setActiveTeamId(event.target.value)}>
-                <option value="">Select team</option>
-                {teams.map((team) => (
-                  <option key={team.id} value={team.id}>
-                    {team.name} · {team.accessRole}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </section>
         </div>
 
-        {activeTeam ? (
-          <div className="game-selection-grid">
-            <section className="panel custom-game-form">
-              <div>
-                <span className="status-pill">{activeTeam.accessRole}</span>
-                <h2>{activeTeam.name} Roster</h2>
-                <p className="muted compact-copy">{players.length} player{players.length === 1 ? "" : "s"} on this roster.</p>
-              </div>
-              {activeTeam.accessRole === "manager" ? (
-                <form onSubmit={addPlayer}>
-                  <div className="field horizontal-grid">
-                    <div>
-                      <label htmlFor="first-name">First</label>
-                      <input id="first-name" value={firstName} onChange={(event) => setFirstName(event.target.value)} />
-                    </div>
-                    <div>
-                      <label htmlFor="last-name">Last</label>
-                      <input id="last-name" value={lastName} onChange={(event) => setLastName(event.target.value)} />
-                    </div>
-                  </div>
-                  <div className="field">
-                    <label htmlFor="jersey">Jersey</label>
-                    <input id="jersey" value={jerseyNumber} onChange={(event) => setJerseyNumber(event.target.value)} />
-                  </div>
-                  <button className="button primary full-width" type="submit">
-                    Add Player
-                  </button>
-                </form>
-              ) : null}
-              <div className="timeline">
-                {players.map((player) => (
-                  <div className="timeline-item" key={player.id}>
-                    <strong>
-                      {player.jersey_number ? `#${player.jersey_number} ` : ""}
-                      {player.first_name} {player.last_name}
-                    </strong>
-                    {activeTeam.accessRole === "manager" ? (
-                      <button className="button small" type="button" onClick={() => deactivatePlayer(player.id)}>
-                        Remove
-                      </button>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section className="panel custom-game-form">
-              <div>
-                <span className="status-pill neutral">Invite</span>
-                <h2>Score-Only Link</h2>
-              </div>
-              {activeTeam.accessRole === "manager" ? (
-                <>
-                  <div className="field">
-                    <label htmlFor="invite-label">Label</label>
-                    <input
-                      id="invite-label"
-                      value={inviteLabel}
-                      onChange={(event) => setInviteLabel(event.target.value)}
-                      placeholder="June scorer"
-                    />
-                  </div>
-                  <button className="button primary full-width" type="button" onClick={createInvite}>
-                    Create Invite
-                  </button>
-                  {latestInviteUrl ? (
-                    <div className="field">
-                      <label htmlFor="invite-url">Latest Invite URL</label>
-                      <input id="invite-url" value={latestInviteUrl} readOnly />
-                    </div>
-                  ) : null}
-                </>
-              ) : (
-                <p className="muted compact-copy">Score-only access can use this roster but cannot create invites.</p>
-              )}
-            </section>
-          </div>
-        ) : null}
-
-        <div className="game-selection-grid">
+        <div className="team-library-full-row">
           <section className="panel game-card">
             <div>
               <span className="status-pill">Demo roster</span>
@@ -559,6 +638,108 @@ export default function HomePage() {
             </Link>
           </section>
         </div>
+          </>
+        ) : (
+          <section className="panel custom-game-form stats-panel">
+            <div>
+              <span className="status-pill neutral">Player Stats</span>
+              <h2>Team Player Stats</h2>
+              <p className="muted compact-copy">Stats are calculated from synced capture events for the selected team.</p>
+            </div>
+
+            <div className="stats-filter-grid">
+              <div className="field">
+                <label htmlFor="stats-team">Team</label>
+                <select
+                  id="stats-team"
+                  value={statsTeamId}
+                  onChange={(event) => {
+                    setStatsTeamId(event.target.value);
+                    setStatsGameSessionId("");
+                  }}
+                >
+                  <option value="">Select team</option>
+                  {teams.map((team) => (
+                    <option key={`stats-${team.id}`} value={team.id}>
+                      {team.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="field">
+                <label htmlFor="stats-game">Game</label>
+                <select
+                  id="stats-game"
+                  value={statsGameSessionId}
+                  onChange={(event) => setStatsGameSessionId(event.target.value)}
+                  disabled={!statsTeamId || statsGames.length === 0}
+                >
+                  <option value="">All games</option>
+                  {statsGames.map((game) => (
+                    <option key={game.sessionId} value={game.sessionId}>
+                      {game.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="stats-summary-row">
+              <span>{statsLoading ? "Loading stats..." : `${playerStats.length} player${playerStats.length === 1 ? "" : "s"}`}</span>
+              <span>{statsGames.length} game{statsGames.length === 1 ? "" : "s"} found</span>
+            </div>
+
+            <div className="stats-table-wrap">
+              <table className="stats-table">
+                <thead>
+                  <tr>
+                    <th>Player</th>
+                    <th>Games</th>
+                    <th>Events</th>
+                    <th>Throws</th>
+                    <th>Comp</th>
+                    <th>Rec</th>
+                    <th>Goals</th>
+                    <th>Drops</th>
+                    <th>Blocks</th>
+                    <th>Turns</th>
+                    <th>Pulls</th>
+                    <th>Tip Self</th>
+                    <th>Pen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {playerStats.length === 0 ? (
+                    <tr>
+                      <td colSpan={13}>{statsTeamId ? "No synced player stats yet." : "Select a team to view stats."}</td>
+                    </tr>
+                  ) : (
+                    playerStats.map((player) => (
+                      <tr key={player.playerId}>
+                        <th scope="row">
+                          {player.jerseyNumber ? `#${player.jerseyNumber} ` : ""}
+                          {player.playerName}
+                        </th>
+                        <td>{player.games}</td>
+                        <td>{player.totalEvents}</td>
+                        <td>{player.throws}</td>
+                        <td>{player.completions}</td>
+                        <td>{player.receptions}</td>
+                        <td>{player.goals}</td>
+                        <td>{player.drops}</td>
+                        <td>{player.blocks}</td>
+                        <td>{player.turnovers}</td>
+                        <td>{player.pulls}</td>
+                        <td>{player.tippedSelfCatches}</td>
+                        <td>{player.penalties}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
 
         <p className="muted">{message}</p>
       </section>

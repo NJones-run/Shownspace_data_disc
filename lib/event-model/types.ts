@@ -24,6 +24,8 @@ export interface CaptureGame {
   GameID: string;
   HomeTeamID: string;
   AwayTeamID: string;
+  homeTeamName?: string;
+  awayTeamName?: string;
   HomeScore: number;
   AwayScore: number;
   Status: string;
